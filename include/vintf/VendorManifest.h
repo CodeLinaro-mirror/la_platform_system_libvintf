@@ -42,12 +42,6 @@ public:
 
     VendorManifest() {}
 
-    // Add an hal to this manifest.
-    bool add(ManifestHal &&hal);
-
-    // clear this manifest.
-    inline void clear() { hals.clear(); }
-
     // Get an HAL entry based on the component name. Return nullptr
     // if the entry does not exist. The component name looks like:
     // android.hardware.foo
@@ -60,10 +54,6 @@ public:
     // for (const ManifestHal &e : vm.getHals()) { }
     ConstMapValueIterable<std::string, ManifestHal> getHals() const;
 
-    // Whether this manifest is a valid one. Note that an empty VendorManifest
-    // (constructed via VendorManifest()) is valid.
-    bool isValid() const;
-
     // Given a component name (e.g. "camera"), return a list of version numbers
     // that are supported by the hardware. If the entry is not found, empty list
     // is returned.
@@ -74,16 +64,29 @@ public:
     std::vector<std::string> checkIncompatiblity(const CompatibilityMatrix &mat) const;
 
     // Gather all Vendor Manifest fragments, and encapsulate in a VendorManifest.
-    // If any error, nullptr is returned.
-    // Note: this is not thread-safe.
+    // If no error, it return the same singleton object in the future, and the HAL manifest
+    // file won't be touched again.
+    // If any error, nullptr is returned, and Get will try to parse the HAL manifest
+    // again when it is called again.
+    // This operation is thread-safe.
     static const VendorManifest *Get();
 
 private:
-    // sorted map from component name to the entry.
-    std::map<std::string, ManifestHal> hals;
+    friend struct VendorManifestConverter;
+    friend struct LibVintfTest;
+    friend std::string dump(const VendorManifest &vm);
 
-private:
+    // Add an hal to this manifest.
+    bool add(ManifestHal &&hal);
+
+    // clear this manifest.
+    inline void clear() { hals.clear(); }
+
     status_t fetchAllInformation();
+
+    // sorted map from component name to the entry.
+    // The component name looks like: android.hardware.foo
+    std::map<std::string, ManifestHal> hals;
 };
 
 

@@ -24,6 +24,7 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <mutex>
 
 #define MANIFEST_PATH "/vendor/manifest/"
 #define MANIFEST_FILE "/vendor/manifest.xml"
@@ -33,17 +34,8 @@ namespace vintf {
 
 constexpr Version VendorManifest::kVersion;
 
-bool VendorManifest::isValid() const {
-    for (const auto &pair : hals) {
-        if (!pair.second.isValid()) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool VendorManifest::add(ManifestHal &&hal) {
-    return hals.emplace(hal.name, std::move(hal)).second;
+    return hal.isValid() && hals.emplace(hal.name, std::move(hal)).second;
 }
 
 const ManifestHal *VendorManifest::getHal(const std::string &name) const {
@@ -68,11 +60,11 @@ ConstMapValueIterable<std::string, ManifestHal> VendorManifest::getHals() const 
 
 const std::vector<Version> &VendorManifest::getSupportedVersions(const std::string &name) const {
     static const std::vector<Version> empty{};
-    auto it = hals.find(name);
-    if (it != hals.end()) {
-        return it->second.versions;
+    const ManifestHal *hal = getHal(name);
+    if (hal == nullptr) {
+        return empty;
     }
-    return empty;
+    return hal->versions;
 }
 
 std::vector<std::string> VendorManifest::checkIncompatiblity(const CompatibilityMatrix &/*mat*/) const {
@@ -127,9 +119,13 @@ status_t VendorManifest::fetchAllInformation() {
 
 // static
 const VendorManifest *VendorManifest::Get() {
-    static VendorManifest vm;
-    static VendorManifest *vmp;
+    static VendorManifest vm{};
+    static VendorManifest *vmp = nullptr;
+    static std::mutex mutex{};
+
+    std::lock_guard<std::mutex> lock(mutex);
     if (vmp == nullptr) {
+        vm.clear();
         if (vm.fetchAllInformation() == OK) {
             vmp = &vm;
         }
@@ -137,6 +133,7 @@ const VendorManifest *VendorManifest::Get() {
 
     return vmp;
 }
+
 
 } // namespace vintf
 } // namespace android
