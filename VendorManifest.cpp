@@ -46,9 +46,14 @@ const ManifestHal *VendorManifest::getHal(const std::string &name) const {
     return &(it->second);
 }
 
-Transport VendorManifest::getTransport(const std::string &name) const {
+Transport VendorManifest::getTransport(const std::string &name, const Version &v) const {
     const ManifestHal *hal = getHal(name);
     if (hal == nullptr) {
+        return Transport::EMPTY;
+    }
+    if (std::find(hal->versions.begin(), hal->versions.end(), v) == hal->versions.end()) {
+        LOG(WARNING) << "VendorManifest::getTransport: Cannot find "
+                     << v.majorVer << "." << v.minorVer << " in supported versions of " << name;
         return Transport::EMPTY;
     }
     return hal->transport;
@@ -103,7 +108,7 @@ status_t VendorManifest::fetchAllInformation() {
     std::ifstream in;
     in.open(MANIFEST_FILE);
     if (!in.is_open()) {
-        LOG(ERROR) << "Cannot open " MANIFEST_FILE;
+        LOG(WARNING) << "Cannot open " MANIFEST_FILE;
         return INVALID_OPERATION;
     }
     std::stringstream ss;
@@ -125,9 +130,11 @@ const VendorManifest *VendorManifest::Get() {
 
     std::lock_guard<std::mutex> lock(mutex);
     if (vmp == nullptr) {
-        vm.clear();
         if (vm.fetchAllInformation() == OK) {
             vmp = &vm;
+        } else {
+            vm.clear();
+            return nullptr;
         }
     }
 
