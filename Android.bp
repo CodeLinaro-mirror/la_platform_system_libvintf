@@ -16,8 +16,14 @@ subdirs = [
     "test"
 ]
 
+libvintf_flags = [
+    "-Wall",
+    "-Werror",
+]
+
 cc_library {
     name: "libvintf",
+    cflags: libvintf_flags,
     shared_libs: [
         "libbase",
         "liblog",
@@ -33,16 +39,18 @@ cc_library {
         "parse_string.cpp",
         "parse_xml.cpp",
         "CompatibilityMatrix.cpp",
-        "KernelInfo.cpp",
+        "KernelConfigTypedValue.cpp",
+        "RuntimeInfo.cpp",
         "ManifestHal.cpp",
         "MatrixHal.cpp",
         "MatrixKernel.cpp",
-        "VendorManifest.cpp",
+        "HalManifest.cpp",
     ],
 }
 
 cc_binary {
     name: "vintf",
+    cflags: libvintf_flags,
     shared_libs: [
         "libvintf",
         "libselinux",

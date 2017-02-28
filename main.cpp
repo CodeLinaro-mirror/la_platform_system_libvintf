@@ -17,18 +17,18 @@
 #include <iostream>
 #include <vintf/parse_xml.h>
 #include <vintf/parse_string.h>
-#include <vintf/KernelInfo.h>
-#include <vintf/VendorManifest.h>
+#include <vintf/RuntimeInfo.h>
+#include <vintf/HalManifest.h>
 
 int main(int, char **) {
     using namespace ::android::vintf;
 
-    const VendorManifest *vm = VendorManifest::Get();
+    const HalManifest *vm = HalManifest::Get();
     if (vm != nullptr)
-        std::cout << gVendorManifestConverter(*vm);
+        std::cout << gHalManifestConverter(*vm);
 
     std::cout << std::endl;
-    const KernelInfo *ki = KernelInfo::Get();
+    const RuntimeInfo *ki = RuntimeInfo::Get();
     if (ki != nullptr)
         std::cout << dump(*ki);
     std::cout << std::endl;

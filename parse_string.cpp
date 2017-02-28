@@ -103,8 +103,93 @@ bool parse(const std::string &s, Transport *tr) {
     return parseEnum(s, tr, gTransportStrings);
 }
 
-std::ostream &operator<<(std::ostream &os, Transport il) {
-    return os << gTransportStrings.at(static_cast<size_t>(il));
+std::ostream &operator<<(std::ostream &os, Transport tr) {
+    return os << gTransportStrings.at(static_cast<size_t>(tr));
+}
+
+bool parse(const std::string &s, KernelConfigType *kc) {
+    return parseEnum(s, kc, gKernelConfigTypeStrings);
+}
+
+std::ostream &operator<<(std::ostream &os, KernelConfigType kc) {
+    return os << gKernelConfigTypeStrings.at(static_cast<size_t>(kc));
+}
+
+bool parse(const std::string &s, Tristate *kc) {
+    return parseEnum(s, kc, gTristateStrings);
+}
+
+std::ostream &operator<<(std::ostream &os, Tristate kc) {
+    return os << gTristateStrings.at(static_cast<size_t>(kc));
+}
+
+std::ostream &operator<<(std::ostream &os, const KernelConfigTypedValue &kctv) {
+    switch (kctv.mType) {
+        case KernelConfigType::STRING:
+            return os << kctv.mStringValue;
+        case KernelConfigType::INTEGER:
+            return os << to_string(kctv.mIntegerValue);
+        case KernelConfigType::RANGE:
+            return os << to_string(kctv.mRangeValue.first) << "-"
+                      << to_string(kctv.mRangeValue.second);
+        case KernelConfigType::TRISTATE:
+            return os << to_string(kctv.mTristateValue);
+    }
+}
+
+// Notice that strtoull is used even though KernelConfigIntValue is signed int64_t,
+// because strtoull can accept negative values as well.
+// Notice that according to man strtoul, strtoull can actually accept
+// -2^64 + 1 to 2^64 - 1, with the 65th bit truncated.
+// ParseInt / ParseUint are not used because they do not handle signed hex very well.
+template <typename T>
+bool parseKernelConfigIntHelper(const std::string &s, T *i) {
+    char *end;
+    errno = 0;
+    unsigned long long int ulli = strtoull(s.c_str(), &end, 0 /* base */);
+    // It is implementation defined that what value will be returned by strtoull
+    // in the error case, so we are checking errno directly here.
+    if (errno == 0 && s.c_str() != end && *end == '\0') {
+        *i = static_cast<T>(ulli);
+        return true;
+    }
+    return false;
+}
+
+bool parseKernelConfigInt(const std::string &s, int64_t *i) {
+    return parseKernelConfigIntHelper(s, i);
+}
+
+bool parseKernelConfigInt(const std::string &s, uint64_t *i) {
+    return parseKernelConfigIntHelper(s, i);
+}
+
+bool parseRange(const std::string &s, KernelConfigRangeValue *range) {
+    auto pos = s.find('-');
+    if (pos == std::string::npos) {
+        return false;
+    }
+    return parseKernelConfigInt(s.substr(0, pos),  &range->first)
+        && parseKernelConfigInt(s.substr(pos + 1), &range->second);
+}
+
+bool parse(const std::string &s, KernelConfigKey *key) {
+    *key = s;
+    return true;
+}
+
+bool parseKernelConfigValue(const std::string &s, KernelConfigTypedValue *kctv) {
+    switch (kctv->mType) {
+        case KernelConfigType::STRING:
+            kctv->mStringValue = s;
+            return true;
+        case KernelConfigType::INTEGER:
+            return parseKernelConfigInt(s, &kctv->mIntegerValue);
+        case KernelConfigType::RANGE:
+            return parseRange(s, &kctv->mRangeValue);
+        case KernelConfigType::TRISTATE:
+            return parse(s, &kctv->mTristateValue);
+    }
 }
 
 bool parse(const std::string &s, Version *ver) {
@@ -153,6 +238,29 @@ std::ostream &operator<<(std::ostream &os, const VersionRange &vr) {
         return os << vr.minVer();
     }
     return os << vr.minVer() << "-" << vr.maxMinor;
+}
+
+bool parse(const std::string &s, KernelVersion *kernelVersion) {
+    std::vector<std::string> v = SplitString(s, '.');
+    if (v.size() != 3) {
+        return false;
+    }
+    size_t version, major, minor;
+    if (!ParseUint(v[0], &version)) {
+        return false;
+    }
+    if (!ParseUint(v[1], &major)) {
+        return false;
+    }
+    if (!ParseUint(v[2], &minor)) {
+        return false;
+    }
+    *kernelVersion = KernelVersion(version, major, minor);
+    return true;
+}
+
+std::ostream &operator<<(std::ostream &os, const KernelVersion &ver) {
+    return os << ver.version << "." << ver.majorRev << "." << ver.minorRev;
 }
 
 bool parse(const std::string &s, ManifestHal *hal) {
@@ -212,15 +320,34 @@ std::ostream &operator<<(std::ostream &os, const MatrixHal &req) {
               << (req.optional ? kOptional : kRequired);
 }
 
-bool parse(const std::string &s, KernelConfig *kc) {
-    if (s.find(kConfigPrefix) != 0) {
+
+std::ostream &operator<<(std::ostream &os, KernelSepolicyVersion ksv){
+    return os << ksv.value;
+}
+
+bool parse(const std::string &s, KernelSepolicyVersion *ksv){
+    return ParseUint(s, &ksv->value);
+}
+
+std::ostream &operator<<(std::ostream &os, const SepolicyVersion &sv){
+    return os << sv.minVer << "-" << sv.maxVer;
+}
+
+bool parse(const std::string &s, SepolicyVersion *sv){
+    std::vector<std::string> v = SplitString(s, '-');
+    if (v.size() != 2) {
         return false;
     }
-    *kc = s;
+    if (!ParseUint(v[0], &sv->minVer)) {
+        return false;
+    }
+    if (!ParseUint(v[1], &sv->maxVer)) {
+        return false;
+    }
     return true;
 }
 
-std::string dump(const VendorManifest &vm) {
+std::string dump(const HalManifest &vm) {
     std::ostringstream oss;
     bool first = true;
     for (const auto &hal : vm.getHals()) {
@@ -233,7 +360,7 @@ std::string dump(const VendorManifest &vm) {
     return oss.str();
 }
 
-std::string dump(const KernelInfo &ki) {
+std::string dump(const RuntimeInfo &ki) {
     std::ostringstream oss;
 
     oss << "kernel = "
@@ -243,8 +370,8 @@ std::string dump(const KernelInfo &ki) {
         << ki.osVersion() << "/"
         << ki.hardwareId() << ";"
         << "kernelSepolicyVersion = " << ki.kernelSepolicyVersion() << ";"
-        << "#CONFIG's loaded = " << ki.kernelConfigs.size() << ";\n";
-    for (const auto &pair : ki.kernelConfigs) {
+        << "#CONFIG's loaded = " << ki.mKernelConfigs.size() << ";\n";
+    for (const auto &pair : ki.mKernelConfigs) {
         oss << pair.first << "=" << pair.second << "\n";
     }
 

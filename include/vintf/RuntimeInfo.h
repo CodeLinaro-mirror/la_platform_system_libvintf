@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
-#ifndef ANDROID_VINTF_KERNEL_INFO_H
-#define ANDROID_VINTF_KERNEL_INFO_H
+#ifndef ANDROID_VINTF_RUNTIME_INFO_H
+#define ANDROID_VINTF_RUNTIME_INFO_H
+
+#include "Version.h"
 
 #include <map>
 #include <string>
@@ -25,13 +27,17 @@
 namespace android {
 namespace vintf {
 
-// Kernel Info sent to OTA server
-struct KernelInfo {
+struct CompatibilityMatrix;
+
+// Runtime Info sent to OTA server
+struct RuntimeInfo {
+
+    RuntimeInfo() {}
 
     // Get the object that contains all kernel information. If any error,
     // nullptr is returned.
     // Note: this is not thread-safe.
-    static const KernelInfo *Get();
+    static const RuntimeInfo *Get();
 
     // /proc/version
     // utsname.sysname
@@ -48,21 +54,27 @@ struct KernelInfo {
     // /sys/fs/selinux/policyvers
     size_t kernelSepolicyVersion() const;
 
+    // Return whether this kernel works with the given compatibility matrix.
+    bool checkCompatibility(const CompatibilityMatrix &mat,
+            std::string *error = nullptr) const;
+
 private:
 
-    friend struct KernelInfoFetcher;
-    friend std::string dump(const KernelInfo &ki);
+    friend struct RuntimeInfoFetcher;
+    friend struct LibVintfTest;
+    friend std::string dump(const RuntimeInfo &ki);
 
     void clear();
 
     // /proc/config.gz
     // Key: CONFIG_xxx; Value: the value after = sign.
-    std::map<std::string, std::string> kernelConfigs;
+    std::map<std::string, std::string> mKernelConfigs;
     std::string mOsName;
     std::string mNodeName;
     std::string mOsRelease;
     std::string mOsVersion;
     std::string mHardwareId;
+    KernelVersion mKernelVersion;
 
     size_t mKernelSepolicyVersion;
 
@@ -71,4 +83,4 @@ private:
 } // namespace vintf
 } // namespace android
 
-#endif // ANDROID_VINTF_KERNEL_INFO_H
+#endif // ANDROID_VINTF_RUNTIME_INFO_H

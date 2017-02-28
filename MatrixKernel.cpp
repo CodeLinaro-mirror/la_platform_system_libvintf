@@ -20,9 +20,9 @@ namespace android {
 namespace vintf {
 
 bool MatrixKernel::operator==(const MatrixKernel &other) const {
-    if (version != other.version)
+    if (mMinLts != other.mMinLts)
         return false;
-    if (configs != other.configs)
+    if (mConfigs != other.mConfigs)
         return false;
     return true;
 }

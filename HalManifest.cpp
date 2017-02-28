@@ -16,15 +16,19 @@
 
 #define LOG_TAG "libvintf"
 
-#include "VendorManifest.h"
-#include "parse_xml.h"
+#include "HalManifest.h"
 
-#include <android-base/logging.h>
+#include "parse_xml.h"
+#include "CompatibilityMatrix.h"
+
 #include <dirent.h>
+
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <mutex>
+
+#include <android-base/logging.h>
 
 #define MANIFEST_PATH "/vendor/manifest/"
 #define MANIFEST_FILE "/vendor/manifest.xml"
@@ -32,38 +36,38 @@
 namespace android {
 namespace vintf {
 
-constexpr Version VendorManifest::kVersion;
+constexpr Version HalManifest::kVersion;
 
-bool VendorManifest::add(ManifestHal &&hal) {
-    return hal.isValid() && hals.emplace(hal.name, std::move(hal)).second;
+bool HalManifest::add(ManifestHal &&hal) {
+    return hal.isValid() && mHals.emplace(hal.name, std::move(hal)).second;
 }
 
-const ManifestHal *VendorManifest::getHal(const std::string &name) const {
-    const auto it = hals.find(name);
-    if (it == hals.end()) {
+const ManifestHal *HalManifest::getHal(const std::string &name) const {
+    const auto it = mHals.find(name);
+    if (it == mHals.end()) {
         return nullptr;
     }
     return &(it->second);
 }
 
-Transport VendorManifest::getTransport(const std::string &name, const Version &v) const {
+Transport HalManifest::getTransport(const std::string &name, const Version &v) const {
     const ManifestHal *hal = getHal(name);
     if (hal == nullptr) {
         return Transport::EMPTY;
     }
     if (std::find(hal->versions.begin(), hal->versions.end(), v) == hal->versions.end()) {
-        LOG(WARNING) << "VendorManifest::getTransport: Cannot find "
+        LOG(WARNING) << "HalManifest::getTransport: Cannot find "
                      << v.majorVer << "." << v.minorVer << " in supported versions of " << name;
         return Transport::EMPTY;
     }
     return hal->transport;
 }
 
-ConstMapValueIterable<std::string, ManifestHal> VendorManifest::getHals() const {
-    return ConstMapValueIterable<std::string, ManifestHal>(hals);
+ConstMapValueIterable<std::string, ManifestHal> HalManifest::getHals() const {
+    return ConstMapValueIterable<std::string, ManifestHal>(mHals);
 }
 
-const std::vector<Version> &VendorManifest::getSupportedVersions(const std::string &name) const {
+const std::vector<Version> &HalManifest::getSupportedVersions(const std::string &name) const {
     static const std::vector<Version> empty{};
     const ManifestHal *hal = getHal(name);
     if (hal == nullptr) {
@@ -72,12 +76,45 @@ const std::vector<Version> &VendorManifest::getSupportedVersions(const std::stri
     return hal->versions;
 }
 
-std::vector<std::string> VendorManifest::checkIncompatiblity(const CompatibilityMatrix &/*mat*/) const {
-    // TODO implement this
-    return std::vector<std::string>();
+static bool isCompatible(const MatrixHal &matrixHal, const ManifestHal &manifestHal) {
+    if (matrixHal.format != manifestHal.format) {
+        return false;
+    }
+    // don't check optional
+
+    for (const Version &manifestVersion : manifestHal.versions) {
+        for (const VersionRange &matrixVersionRange : matrixHal.versionRanges) {
+            // If Compatibility Matrix says 2.5-2.7, the "2.7" is purely informational;
+            // the framework can work with all 2.5-2.infinity.
+            if (manifestVersion.majorVer == matrixVersionRange.majorVer &&
+                manifestVersion.minorVer >= matrixVersionRange.minMinor) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-status_t VendorManifest::fetchAllInformation() {
+std::vector<std::string> HalManifest::checkIncompatiblity(const CompatibilityMatrix &mat) const {
+    std::vector<std::string> incompatible;
+    for (const MatrixHal &matrixHal : mat.getHals()) {
+        // don't check optional; put it in the incompatibility list as well.
+        const std::string &name = matrixHal.name;
+        auto it = mHals.find(name);
+        if (it == mHals.end()) {
+            incompatible.push_back(name);
+            continue;
+        }
+        const ManifestHal &manifestHal = it->second;
+        if (!isCompatible(matrixHal, manifestHal)) {
+            incompatible.push_back(name);
+            continue;
+        }
+    }
+    return incompatible;
+}
+
+status_t HalManifest::fetchAllInformation() {
 #if 0
     // TODO: b/33755377 Uncomment this if we use a directory of fragments instead.
     status_t err = OK;
@@ -113,19 +150,19 @@ status_t VendorManifest::fetchAllInformation() {
     }
     std::stringstream ss;
     ss << in.rdbuf();
-    bool success = gVendorManifestConverter(this, ss.str());
+    bool success = gHalManifestConverter(this, ss.str());
     if (!success) {
         LOG(ERROR) << "Illformed vendor manifest: " MANIFEST_FILE << ": "
-                   << gVendorManifestConverter.lastError();
+                   << gHalManifestConverter.lastError();
         return BAD_VALUE;
     }
     return OK;
 }
 
 // static
-const VendorManifest *VendorManifest::Get() {
-    static VendorManifest vm{};
-    static VendorManifest *vmp = nullptr;
+const HalManifest *HalManifest::Get() {
+    static HalManifest vm{};
+    static HalManifest *vmp = nullptr;
     static std::mutex mutex{};
 
     std::lock_guard<std::mutex> lock(mutex);

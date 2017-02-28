@@ -22,6 +22,7 @@
 
 #include "MatrixHal.h"
 #include "MatrixKernel.h"
+#include "MapValueIterator.h"
 #include "Sepolicy.h"
 
 namespace android {
@@ -31,6 +32,15 @@ namespace vintf {
 struct CompatibilityMatrix {
     constexpr static Version kVersion{1, 0};
 
+    // Return an iterable to all MatrixHal objects. Call it as follows:
+    // for (const MatrixHal &e : cm.getHals()) { }
+    ConstMapValueIterable<std::string, MatrixHal> getHals() const;
+
+    // Find a MatrixKernel entry that has version v. nullptr if not found.
+    const MatrixKernel *findKernel(const KernelVersion &v) const;
+
+    const Sepolicy &getSepolicy() const;
+
 private:
     bool add(MatrixHal &&hal);
     bool add(MatrixKernel &&kernel);
@@ -38,14 +48,13 @@ private:
 
     friend struct CompatibilityMatrixConverter;
     friend struct LibVintfTest;
-    friend struct VendorManifest;
 
     // sorted map from component name to the entry.
-    std::map<std::string, MatrixHal> hals;
+    std::map<std::string, MatrixHal> mHals;
 
-    std::vector<MatrixKernel> kernels;
+    std::vector<MatrixKernel> mKernels;
 
-    Sepolicy sepolicy;
+    Sepolicy mSepolicy;
 };
 
 } // namespace vintf
