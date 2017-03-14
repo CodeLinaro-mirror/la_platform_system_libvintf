@@ -18,9 +18,6 @@
 
 #include "HalManifest.h"
 
-#include "parse_xml.h"
-#include "CompatibilityMatrix.h"
-
 #include <dirent.h>
 
 #include <fstream>
@@ -30,8 +27,9 @@
 
 #include <android-base/logging.h>
 
-#define MANIFEST_PATH "/vendor/manifest/"
-#define MANIFEST_FILE "/vendor/manifest.xml"
+#include "parse_string.h"
+#include "parse_xml.h"
+#include "CompatibilityMatrix.h"
 
 namespace android {
 namespace vintf {
@@ -50,17 +48,43 @@ const ManifestHal *HalManifest::getHal(const std::string &name) const {
     return &(it->second);
 }
 
-Transport HalManifest::getTransport(const std::string &name, const Version &v) const {
-    const ManifestHal *hal = getHal(name);
+ManifestHal *HalManifest::getHal(const std::string &name) {
+    return const_cast<ManifestHal *>(const_cast<const HalManifest *>(this)->getHal(name));
+}
+
+Transport HalManifest::getTransport(const std::string &package, const Version &v,
+            const std::string &interfaceName, const std::string &instanceName) const {
+    const ManifestHal *hal = getHal(package);
     if (hal == nullptr) {
         return Transport::EMPTY;
     }
     if (std::find(hal->versions.begin(), hal->versions.end(), v) == hal->versions.end()) {
         LOG(WARNING) << "HalManifest::getTransport: Cannot find "
-                     << v.majorVer << "." << v.minorVer << " in supported versions of " << name;
+                     << to_string(v) << " in supported versions of " << package;
         return Transport::EMPTY;
     }
-    return hal->transport;
+    auto it = hal->interfaces.find(interfaceName);
+    if (it == hal->interfaces.end()) {
+        // Missing interface tag, default to "default"
+        if (instanceName == "default") {
+            LOG(DEBUG) << "HalManifest::getTransport: Using "
+                       << ::android::vintf::to_string(hal->transportArch.transport)
+                       << " for " << interfaceName << "/default because the interface"
+                       << " is not in the manifest.";
+            return hal->transportArch.transport;
+        }
+        LOG(WARNING) << "HalManifest::getTransport: Cannot find interface '"
+                     << interfaceName << "' in " << package << "@" << to_string(v);
+        return Transport::EMPTY;
+    }
+    const auto &instances = it->second.instances;
+    if (instances.find(instanceName) == instances.end()) {
+        LOG(WARNING) << "HalManifest::getTransport: Cannot find instance '"
+                     << instanceName << "' in "
+                     << package << "@" << to_string(v) << "::" << interfaceName;
+        return Transport::EMPTY;
+    }
+    return hal->transportArch.transport;
 }
 
 ConstMapValueIterable<std::string, ManifestHal> HalManifest::getHals() const {
@@ -74,6 +98,29 @@ const std::vector<Version> &HalManifest::getSupportedVersions(const std::string 
         return empty;
     }
     return hal->versions;
+}
+
+
+const std::set<std::string> &HalManifest::getInstances(
+        const std::string &halName, const std::string &interfaceName) const {
+    static const std::set<std::string> empty{};
+    static const std::set<std::string> def{{"default"}};
+    const ManifestHal *hal = getHal(halName);
+    if (hal == nullptr) {
+        return empty;
+    }
+    auto it = hal->interfaces.find(interfaceName);
+    if (it == hal->interfaces.end()) {
+        return def;
+    }
+    return it->second.instances;
+}
+
+
+bool HalManifest::hasInstance(const std::string &halName,
+        const std::string &interfaceName, const std::string &instanceName) const {
+    const auto &instances = getInstances(halName, interfaceName);
+    return instances.find(instanceName) != instances.end();
 }
 
 static bool isCompatible(const MatrixHal &matrixHal, const ManifestHal &manifestHal) {
@@ -114,68 +161,22 @@ std::vector<std::string> HalManifest::checkIncompatiblity(const CompatibilityMat
     return incompatible;
 }
 
-status_t HalManifest::fetchAllInformation() {
-#if 0
-    // TODO: b/33755377 Uncomment this if we use a directory of fragments instead.
-    status_t err = OK;
-    DIR *dir = NULL;
-    struct dirent *e;
+status_t HalManifest::fetchAllInformation(const std::string &path) {
     std::ifstream in;
-    std::string buf;
-    if ((dir = opendir(MANIFEST_PATH))) {
-        while ((e = readdir(dir))) {
-            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
-                continue;
-            }
-            in.open(e->d_name);
-            in >> buf;
-
-            err = handleFragment(this, buf); // And we will need to define this
-            if (err != OK) {
-                break;
-            }
-        }
-    }
-    if (dir != NULL) {
-        closedir(dir);
-    }
-    return err;
-#endif
-
-    std::ifstream in;
-    in.open(MANIFEST_FILE);
+    in.open(path);
     if (!in.is_open()) {
-        LOG(WARNING) << "Cannot open " MANIFEST_FILE;
+        LOG(WARNING) << "Cannot open " << path;
         return INVALID_OPERATION;
     }
     std::stringstream ss;
     ss << in.rdbuf();
     bool success = gHalManifestConverter(this, ss.str());
     if (!success) {
-        LOG(ERROR) << "Illformed vendor manifest: " MANIFEST_FILE << ": "
+        LOG(ERROR) << "Illformed vendor manifest: " << path << ": "
                    << gHalManifestConverter.lastError();
         return BAD_VALUE;
     }
     return OK;
-}
-
-// static
-const HalManifest *HalManifest::Get() {
-    static HalManifest vm{};
-    static HalManifest *vmp = nullptr;
-    static std::mutex mutex{};
-
-    std::lock_guard<std::mutex> lock(mutex);
-    if (vmp == nullptr) {
-        if (vm.fetchAllInformation() == OK) {
-            vmp = &vm;
-        } else {
-            vm.clear();
-            return nullptr;
-        }
-    }
-
-    return vmp;
 }
 
 

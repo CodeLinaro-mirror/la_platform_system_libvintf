@@ -20,10 +20,12 @@
 
 #include <string>
 #include <vector>
+#include <map>
 
 #include "HalFormat.h"
 #include "ImplLevel.h"
-#include "Transport.h"
+#include "ManifestHalInterface.h"
+#include "TransportArch.h"
 #include "Version.h"
 
 namespace android {
@@ -34,21 +36,8 @@ struct HalImplementation {
     std::string impl;
 };
 
+// A component of HalManifest.
 struct ManifestHal {
-
-    // convenience constructors
-    static ManifestHal hal(std::string &&name,
-                           ImplLevel implLevel,
-                           std::string &&impl,
-                           Version version,
-                           Transport transport);
-    static ManifestHal hal(std::string &&name,
-                           ImplLevel implLevel,
-                           std::string &&impl,
-                           std::vector<Version> &&versions,
-                           Transport transport);
-    static ManifestHal nonhal(std::string &&name,
-                              std::vector<Version> &&versions);
 
     bool operator==(const ManifestHal &other) const;
 
@@ -56,7 +45,8 @@ struct ManifestHal {
     std::string name;
     std::vector<Version> versions;
     HalImplementation impl;
-    Transport transport = Transport::EMPTY;
+    TransportArch transportArch;
+    std::map<std::string, ManifestHalInterface> interfaces;
 
 private:
     friend struct LibVintfTest;

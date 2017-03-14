@@ -75,14 +75,6 @@ inline void appendText(NodeType *parent, const std::string &text, DocType *d) {
     parent->InsertEndChild(d->NewText(text.c_str()));
 }
 
-// text -> <name>text</name>
-inline void appendTextElement(NodeType *parent, const std::string &name,
-            const std::string &text, DocType *d) {
-    NodeType *c = createNode(name, d);
-    appendText(c, text, d);
-    appendChild(parent, c);
-}
-
 inline std::string nameOf(NodeType *root) {
     return root->Name() == NULL ? "" : root->Name();
 }
@@ -118,6 +110,19 @@ inline bool getAttr(NodeType *root, const std::string &attrName, std::string *s)
 }
 
 // --------------- tinyxml2 details end.
+
+// Helper functions for XmlConverter
+static bool parse(const std::string &attrText, bool *attr) {
+    if (attrText == "true" || attrText == "1") {
+        *attr = true;
+        return true;
+    }
+    if (attrText == "false" || attrText == "0") {
+        *attr = false;
+        return true;
+    }
+    return false;
+}
 
 // ---------------------- XmlNodeConverter definitions
 
@@ -172,6 +177,8 @@ struct XmlNodeConverter : public XmlConverter<Object> {
     }
 
     // convenience methods for implementor.
+
+    // All append* functions helps mutateNode() to serialize the object into XML.
     template <typename T>
     inline void appendAttr(NodeType *e, const std::string &attrName, const T &attr) const {
         return appendStrAttr(e, attrName, ::android::vintf::to_string(attr));
@@ -179,6 +186,48 @@ struct XmlNodeConverter : public XmlConverter<Object> {
 
     inline void appendAttr(NodeType *e, const std::string &attrName, bool attr) const {
         return appendStrAttr(e, attrName, attr ? "true" : "false");
+    }
+
+    // text -> <name>text</name>
+    inline void appendTextElement(NodeType *parent, const std::string &name,
+                const std::string &text, DocType *d) const {
+        NodeType *c = createNode(name, d);
+        appendText(c, text, d);
+        appendChild(parent, c);
+    }
+
+    // text -> <name>text</name>
+    template<typename Array>
+    inline void appendTextElements(NodeType *parent, const std::string &name,
+                const Array &array, DocType *d) const {
+        for (const std::string &text : array) {
+            NodeType *c = createNode(name, d);
+            appendText(c, text, d);
+            appendChild(parent, c);
+        }
+    }
+
+    template<typename T, typename Array>
+    inline void appendChildren(NodeType *parent, const XmlNodeConverter<T> &conv,
+            const Array &array, DocType *d) const {
+        for (const T &t : array) {
+            appendChild(parent, conv(t, d));
+        }
+    }
+
+    // All parse* functions helps buildObject() to deserialize XML to the object. Returns
+    // true if deserialization is successful, false if any error, and mLastError will be
+    // set to error message.
+    template <typename T>
+    inline bool parseOptionalAttr(NodeType *root, const std::string &attrName,
+            T &&defaultValue, T *attr) const {
+        std::string attrText;
+        bool success = getAttr(root, attrName, &attrText) &&
+                       ::android::vintf::parse(attrText, attr);
+        if (!success) {
+            *attr = std::move(defaultValue);
+        }
+        return true;
     }
 
     template <typename T>
@@ -199,25 +248,6 @@ struct XmlNodeConverter : public XmlConverter<Object> {
         return ret;
     }
 
-    inline bool parseAttr(NodeType *root, const std::string &attrName, bool *attr) const {
-        std::string attrText;
-        if (!getAttr(root, attrName, &attrText)) {
-            mLastError = "Could not find attr with name " + attrName;
-            return false;
-        }
-        if (attrText == "true" || attrText == "1") {
-            *attr = true;
-            return true;
-        }
-        if (attrText == "false" || attrText == "0") {
-            *attr = false;
-            return true;
-        }
-        mLastError = "Could not parse attr with name \"" + attrName
-                + "\" and value \"" + attrText + "\"";
-        return false;
-    }
-
     inline bool parseTextElement(NodeType *root,
             const std::string &elementName, std::string *s) const {
         NodeType *child = getChild(root, elementName);
@@ -229,12 +259,37 @@ struct XmlNodeConverter : public XmlConverter<Object> {
         return true;
     }
 
+    inline bool parseTextElements(NodeType *root, const std::string &elementName,
+            std::vector<std::string> *v) const {
+        auto nodes = getChildren(root, elementName);
+        v->resize(nodes.size());
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            v->at(i) = getText(nodes[i]);
+        }
+        return true;
+    }
+
     template <typename T>
     inline bool parseChild(NodeType *root, const XmlNodeConverter<T> &conv, T *t) const {
         NodeType *child = getChild(root, conv.elementName());
         if (child == nullptr) {
             mLastError = "Could not find element with name " + conv.elementName();
             return false;
+        }
+        bool success = conv.deserialize(t, child);
+        if (!success) {
+            mLastError = conv.lastError();
+        }
+        return success;
+    }
+
+    template <typename T>
+    inline bool parseOptionalChild(NodeType *root, const XmlNodeConverter<T> &conv,
+            T &&defaultValue, T *t) const {
+        NodeType *child = getChild(root, conv.elementName());
+        if (child == nullptr) {
+            *t = std::move(defaultValue);
+            return true;
         }
         bool success = conv.deserialize(t, child);
         if (!success) {
@@ -261,6 +316,10 @@ struct XmlNodeConverter : public XmlConverter<Object> {
         return true;
     }
 
+    template <typename T>
+    inline bool parseText(NodeType *node, T *s) const {
+        return ::android::vintf::parse(getText(node), s);
+    }
 protected:
     mutable std::string mLastError;
 };
@@ -292,9 +351,32 @@ const XmlTextConverter<Version> versionConverter{"version"};
 
 const XmlTextConverter<VersionRange> versionRangeConverter{"version"};
 
-const XmlTextConverter<Transport> transportConverter{"transport"};
-
 const XmlTextConverter<KernelConfigKey> kernelConfigKeyConverter{"key"};
+
+struct TransportArchConverter : public XmlNodeConverter<TransportArch> {
+    std::string elementName() const override { return "transport"; }
+    void mutateNode(const TransportArch &object, NodeType *root, DocType *d) const override {
+        if (object.arch != Arch::ARCH_EMPTY) {
+            appendAttr(root, "arch", object.arch);
+        }
+        appendText(root, ::android::vintf::to_string(object.transport), d);
+    }
+    bool buildObject(TransportArch *object, NodeType *root) const override {
+        if (!parseOptionalAttr(root, "arch", Arch::ARCH_EMPTY, &object->arch) ||
+            !parseText(root, &object->transport)) {
+            return false;
+        }
+        if (!object->isValid()) {
+            this->mLastError = "transport == " + ::android::vintf::to_string(object->transport) +
+                    " and arch == " + ::android::vintf::to_string(object->arch) +
+                    " is not a valid combination.";
+            return false;
+        }
+        return true;
+    }
+};
+
+const TransportArchConverter transportArchConverter{};
 
 struct KernelConfigTypedValueConverter : public XmlNodeConverter<KernelConfigTypedValue> {
     std::string elementName() const override { return "value"; }
@@ -309,6 +391,7 @@ struct KernelConfigTypedValueConverter : public XmlNodeConverter<KernelConfigTyp
             return false;
         }
         if (!::android::vintf::parseKernelConfigValue(stringValue, object)) {
+            this->mLastError = "Could not parse kernel config value \"" + stringValue + "\"";
             return false;
         }
         return true;
@@ -340,13 +423,11 @@ struct MatrixHalConverter : public XmlNodeConverter<MatrixHal> {
         appendAttr(root, "format", hal.format);
         appendAttr(root, "optional", hal.optional);
         appendTextElement(root, "name", hal.name, d);
-        for (const auto &version : hal.versionRanges) {
-            appendChild(root, versionRangeConverter(version, d));
-        }
+        appendChildren(root, versionRangeConverter, hal.versionRanges, d);
     }
     bool buildObject(MatrixHal *object, NodeType *root) const override {
-        if (!parseAttr(root, "format", &object->format) ||
-            !parseAttr(root, "optional", &object->optional) ||
+        if (!parseOptionalAttr(root, "format", HalFormat::HIDL, &object->format) ||
+            !parseOptionalAttr(root, "optional", false /* defaultValue */, &object->optional) ||
             !parseTextElement(root, "name", &object->name) ||
             !parseChildren(root, versionRangeConverter, &object->versionRanges)) {
             return false;
@@ -360,20 +441,12 @@ const MatrixHalConverter matrixHalConverter{};
 struct MatrixKernelConverter : public XmlNodeConverter<MatrixKernel> {
     std::string elementName() const override { return "kernel"; }
     void mutateNode(const MatrixKernel &kernel, NodeType *root, DocType *d) const override {
-        appendAttr(root, "version", Version{kernel.mMinLts.version, kernel.mMinLts.majorRev});
-        appendAttr(root, "minlts", kernel.mMinLts);
-        for (const KernelConfig &config : kernel.mConfigs) {
-            appendChild(root, kernelConfigConverter(config, d));
-        }
+        appendAttr(root, "version", kernel.mMinLts);
+        appendChildren(root, kernelConfigConverter, kernel.mConfigs, d);
     }
     bool buildObject(MatrixKernel *object, NodeType *root) const override {
-        Version v;
-        if (!parseAttr(root, "minlts", &object->mMinLts) ||
-            !parseAttr(root, "version", &v) ||
+        if (!parseAttr(root, "version", &object->mMinLts) ||
             !parseChildren(root, kernelConfigConverter, &object->mConfigs)) {
-            return false;
-        }
-        if (v != Version{object->mMinLts.version, object->mMinLts.majorRev}) {
             return false;
         }
         return true;
@@ -399,27 +472,68 @@ struct HalImplementationConverter : public XmlNodeConverter<HalImplementation> {
 
 const HalImplementationConverter halImplementationConverter{};
 
+struct ManfiestHalInterfaceConverter : public XmlNodeConverter<ManifestHalInterface> {
+    std::string elementName() const override { return "interface"; }
+    void mutateNode(const ManifestHalInterface &intf, NodeType *root, DocType *d) const override {
+        appendTextElement(root, "name", intf.name, d);
+        appendTextElements(root, "instance", intf.instances, d);
+    }
+    bool buildObject(ManifestHalInterface *intf, NodeType *root) const override {
+        std::vector<std::string> instances;
+        if (!parseTextElement(root, "name", &intf->name) ||
+            !parseTextElements(root, "instance", &instances)) {
+            return false;
+        }
+        intf->instances.clear();
+        intf->instances.insert(instances.begin(), instances.end());
+        if (intf->instances.size() != instances.size()) {
+            this->mLastError = "Duplicated instances in " + intf->name;
+            return false;
+        }
+        return true;
+    }
+};
+
+const ManfiestHalInterfaceConverter manfiestHalInterfaceConverter{};
+
 struct ManifestHalConverter : public XmlNodeConverter<ManifestHal> {
     std::string elementName() const override { return "hal"; }
     void mutateNode(const ManifestHal &hal, NodeType *root, DocType *d) const override {
         appendAttr(root, "format", hal.format);
         appendTextElement(root, "name", hal.name, d);
-        appendChild(root, transportConverter(hal.transport, d));
-        appendChild(root,
-            halImplementationConverter(hal.impl, d));
-        for (const auto &version : hal.versions) {
-            appendChild(root, versionConverter(version, d));
+        if (!hal.transportArch.empty()) {
+            appendChild(root, transportArchConverter(hal.transportArch, d));
         }
+        if (hal.impl.implLevel != ImplLevel::EMPTY) {
+            appendChild(root, halImplementationConverter(hal.impl, d));
+        }
+        appendChildren(root, versionConverter, hal.versions, d);
+        appendChildren(root, manfiestHalInterfaceConverter, iterateValues(hal.interfaces), d);
     }
     bool buildObject(ManifestHal *object, NodeType *root) const override {
-        if (!parseAttr(root, "format", &object->format) ||
+        std::vector<ManifestHalInterface> interfaces;
+        if (!parseOptionalAttr(root, "format", HalFormat::HIDL, &object->format) ||
             !parseTextElement(root, "name", &object->name) ||
-            !parseChild(root, transportConverter, &object->transport) ||
-            !parseChild(root, halImplementationConverter, &object->impl) ||
-            !parseChildren(root, versionConverter, &object->versions)) {
+            !parseChild(root, transportArchConverter, &object->transportArch) ||
+            !parseOptionalChild(root, halImplementationConverter, {}, &object->impl) ||
+            !parseChildren(root, versionConverter, &object->versions) ||
+            !parseChildren(root, manfiestHalInterfaceConverter, &interfaces)) {
             return false;
         }
-        return object->isValid();
+        object->interfaces.clear();
+        for (auto &&interface : interfaces) {
+            auto res = object->interfaces.emplace(interface.name,
+                                                  std::move(interface));
+            if (!res.second) {
+                this->mLastError = "Duplicated instance entry " + res.first->first;
+                return false;
+            }
+        }
+        if (!object->isValid()) {
+            this->mLastError = "'" + object->name + "' is not a valid Manifest HAL.";
+            return false;
+        }
+        return true;
     }
 };
 
@@ -450,9 +564,7 @@ struct HalManifestConverter : public XmlNodeConverter<HalManifest> {
     std::string elementName() const override { return "manifest"; }
     void mutateNode(const HalManifest &m, NodeType *root, DocType *d) const override {
         appendAttr(root, "version", HalManifest::kVersion);
-        for (const auto &hal : m.getHals()) {
-            appendChild(root, manifestHalConverter(hal, d));
-        }
+        appendChildren(root, manifestHalConverter, m.getHals(), d);
     }
     bool buildObject(HalManifest *object, NodeType *root) const override {
         std::vector<ManifestHal> hals;
@@ -460,7 +572,10 @@ struct HalManifestConverter : public XmlNodeConverter<HalManifest> {
             return false;
         }
         for (auto &&hal : hals) {
-            object->add(std::move(hal));
+            if (!object->add(std::move(hal))) {
+                this->mLastError = "Duplicated manifest.hal entry";
+                return false;
+            }
         }
         return true;
     }
@@ -472,12 +587,8 @@ struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatri
     std::string elementName() const override { return "compatibility-matrix"; }
     void mutateNode(const CompatibilityMatrix &m, NodeType *root, DocType *d) const override {
         appendAttr(root, "version", CompatibilityMatrix::kVersion);
-        for (const auto &pair : m.mHals) {
-            appendChild(root, matrixHalConverter(pair.second, d));
-        }
-        for (const auto &kernel : m.mKernels) {
-            appendChild(root, matrixKernelConverter(kernel, d));
-        }
+        appendChildren(root, matrixHalConverter, iterateValues(m.mHals), d);
+        appendChildren(root, matrixKernelConverter, m.mKernels, d);
         appendChild(root, sepolicyConverter(m.mSepolicy, d));
     }
     bool buildObject(CompatibilityMatrix *object, NodeType *root) const override {
@@ -488,7 +599,10 @@ struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatri
             return false;
         }
         for (auto &&hal : hals) {
-            object->add(std::move(hal));
+            if (!object->add(std::move(hal))) {
+                this->mLastError = "Duplicated compatibility-matrix.hal entry";
+                return false;
+            }
         }
         return true;
     }
@@ -507,6 +621,7 @@ const XmlConverter<KernelConfigTypedValue> &gKernelConfigTypedValueConverter
         = kernelConfigTypedValueConverter;
 const XmlConverter<MatrixHal> &gMatrixHalConverter = matrixHalConverter;
 const XmlConverter<HalImplementation> &gHalImplementationConverter = halImplementationConverter;
+const XmlConverter<ManifestHal> &gManifestHalConverter = manifestHalConverter;
 
 } // namespace vintf
 } // namespace android

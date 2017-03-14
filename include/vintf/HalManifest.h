@@ -32,7 +32,7 @@ namespace vintf {
 
 struct CompatibilityMatrix;
 
-// A Vendor Interface Object is reported by the hardware and query-able from
+// A HalManifest is reported by the hardware and query-able from
 // framework code. This is the API for the framework.
 struct HalManifest {
 public:
@@ -42,50 +42,60 @@ public:
 
     HalManifest() {}
 
-    // Get an HAL entry based on the component name. Return nullptr
-    // if the entry does not exist. The component name looks like:
-    // android.hardware.foo
-    const ManifestHal *getHal(const std::string &name) const;
+    // Given a component name (e.g. "android.hardware.camera"),
+    // return getHal(name)->transport if the component exist and v exactly matches
+    // one of the versions in that component, else EMPTY
+    Transport getTransport(const std::string &name, const Version &v,
+            const std::string &interfaceName, const std::string &instanceName) const;
 
-    // return getHal(name)->transport if the entry exist and v exactly matches
-    // one of the versions in that entry, else EMPTY
-    Transport getTransport(const std::string &name, const Version &v) const;
-
-    // Return an iterable to all ManifestHal objects. Call it as follows:
-    // for (const ManifestHal &e : vm.getHals()) { }
-    ConstMapValueIterable<std::string, ManifestHal> getHals() const;
-
-    // Given a component name (e.g. "camera"), return a list of version numbers
-    // that are supported by the hardware. If the entry is not found, empty list
-    // is returned.
+    // Given a component name (e.g. "android.hardware.camera"),
+    // return a list of version numbers that are supported by the hardware.
+    // If the component is not found, empty list is returned.
     const std::vector<Version> &getSupportedVersions(const std::string &name) const;
+
+    // Given a component name (e.g. "android.hardware.camera") and an interface
+    // name, return all instance names for that interface.
+    // * If the component ("android.hardware.camera") does not exist, return empty list
+    // * If the component ("android.hardware.camera") does exist,
+    //    * If the interface (ICamera) does not exist, return {"default"}
+    //    * Else return the list hal.interface.instance
+    const std::set<std::string> &getInstances(
+            const std::string &halName, const std::string &interfaceName) const;
+
+    // Convenience method for checking if instanceName is in getInstances(halName, interfaceName)
+    bool hasInstance(const std::string &halName,
+            const std::string &interfaceName, const std::string &instanceName) const;
 
     // Return a list of component names that does NOT conform to
     // the given compatibility matrix. It may contain components that are optional
     // for the framework.
     std::vector<std::string> checkIncompatiblity(const CompatibilityMatrix &mat) const;
 
-    // Gather all Vendor Manifest fragments, and encapsulate in a HalManifest.
-    // If no error, it return the same singleton object in the future, and the HAL manifest
-    // file won't be touched again.
-    // If any error, nullptr is returned, and Get will try to parse the HAL manifest
-    // again when it is called again.
-    // This operation is thread-safe.
-    static const HalManifest *Get();
+    // Add an hal to this manifest so that a HalManifest can be constructed programatically.
+    bool add(ManifestHal &&hal);
+
+    // Get an HAL component based on the component name. Return nullptr
+    // if the component does not exist. The component name looks like:
+    // android.hardware.foo
+    const ManifestHal *getHal(const std::string &name) const;
+    ManifestHal *getHal(const std::string &name);
 
 private:
     friend struct HalManifestConverter;
+    friend class VintfObject;
     friend struct LibVintfTest;
-
-    // Add an hal to this manifest.
-    bool add(ManifestHal &&hal);
+    friend std::string dump(const HalManifest &vm);
 
     // clear this manifest.
     inline void clear() { mHals.clear(); }
 
-    status_t fetchAllInformation();
+    // Return an iterable to all ManifestHal objects. Call it as follows:
+    // for (const ManifestHal &e : vm.getHals()) { }
+    ConstMapValueIterable<std::string, ManifestHal> getHals() const;
 
-    // sorted map from component name to the entry.
+    status_t fetchAllInformation(const std::string &path);
+
+    // sorted map from component name to the component.
     // The component name looks like: android.hardware.foo
     std::map<std::string, ManifestHal> mHals;
 };
