@@ -85,14 +85,6 @@ Transport HalManifest::getTransport(const std::string &package, const Version &v
     }
     auto it = hal->interfaces.find(interfaceName);
     if (it == hal->interfaces.end()) {
-        // Missing interface tag, default to "default"
-        if (instanceName == "default") {
-            LOG(DEBUG) << "HalManifest::getTransport: Using "
-                       << ::android::vintf::to_string(hal->transportArch.transport)
-                       << " for " << interfaceName << "/default because the interface"
-                       << " is not in the manifest.";
-            return hal->transportArch.transport;
-        }
         LOG(WARNING) << "HalManifest::getTransport: Cannot find interface '"
                      << interfaceName << "' in " << package << "@" << to_string(v);
         return Transport::EMPTY;
@@ -199,6 +191,14 @@ status_t HalManifest::fetchAllInformation(const std::string &path) {
     return OK;
 }
 
+bool operator==(const HalManifest &lft, const HalManifest &rgt) {
+    return lft.mType == rgt.mType &&
+           lft.mHals == rgt.mHals &&
+           (lft.mType != SchemaType::DEVICE || (
+                lft.device.mSepolicyVersion == rgt.device.mSepolicyVersion)) &&
+           (lft.mType != SchemaType::FRAMEWORK || (
+                lft.framework.mVndks == rgt.framework.mVndks));
+}
 
 } // namespace vintf
 } // namespace android

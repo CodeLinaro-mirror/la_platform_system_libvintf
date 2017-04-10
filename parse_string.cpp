@@ -92,11 +92,11 @@ bool parseEnum(const std::string &s, E *e, const Array &strings) {
     }                                                              \
 
 DEFINE_PARSE_STREAMIN_FOR_ENUM(HalFormat);
-DEFINE_PARSE_STREAMIN_FOR_ENUM(ImplLevel);
 DEFINE_PARSE_STREAMIN_FOR_ENUM(Transport);
 DEFINE_PARSE_STREAMIN_FOR_ENUM(Arch);
 DEFINE_PARSE_STREAMIN_FOR_ENUM(KernelConfigType);
 DEFINE_PARSE_STREAMIN_FOR_ENUM(Tristate);
+DEFINE_PARSE_STREAMIN_FOR_ENUM(SchemaType);
 
 std::ostream &operator<<(std::ostream &os, const KernelConfigTypedValue &kctv) {
     switch (kctv.mType) {
@@ -215,6 +215,36 @@ std::ostream &operator<<(std::ostream &os, const VersionRange &vr) {
     return os << vr.minVer() << "-" << vr.maxMinor;
 }
 
+bool parse(const std::string &s, VndkVersionRange *vr) {
+    std::vector<std::string> v = SplitString(s, '-');
+    if (v.size() != 1 && v.size() != 2) {
+        return false;
+    }
+    std::vector<std::string> minVector = SplitString(v[0], '.');
+    if (minVector.size() != 3) {
+        return false;
+    }
+    if (!ParseUint(minVector[0], &vr->sdk) ||
+        !ParseUint(minVector[1], &vr->vndk) ||
+        !ParseUint(minVector[2], &vr->patchMin)) {
+        return false;
+    }
+    if (v.size() == 1) {
+        vr->patchMax = vr->patchMin;
+        return true;
+    } else {
+        return ParseUint(v[1], &vr->patchMax);
+    }
+}
+
+std::ostream &operator<<(std::ostream &os, const VndkVersionRange &vr) {
+    os << vr.sdk << "." << vr.vndk << "." << vr.patchMin;
+    if (!vr.isSingleVersion()) {
+        os << "-" << vr.patchMax;
+    }
+    return os;
+}
+
 bool parse(const std::string &s, KernelVersion *kernelVersion) {
     std::vector<std::string> v = SplitString(s, '.');
     if (v.size() != 3) {
@@ -270,7 +300,7 @@ std::ostream &operator<<(std::ostream &os, const KernelVersion &ver) {
 
 bool parse(const std::string &s, ManifestHal *hal) {
     std::vector<std::string> v = SplitString(s, '/');
-    if (v.size() != 5) {
+    if (v.size() != 4) {
         return false;
     }
     if (!parse(v[0], &hal->format)) {
@@ -280,11 +310,7 @@ bool parse(const std::string &s, ManifestHal *hal) {
     if (!parse(v[2], &hal->transportArch)) {
         return false;
     }
-    if (!parse(v[3], &hal->impl.implLevel)) {
-        return false;
-    }
-    hal->impl.impl = v[4];
-    if (!parse(v[5], &hal->versions)) {
+    if (!parse(v[3], &hal->versions)) {
         return false;
     }
     return hal->isValid();
@@ -294,8 +320,6 @@ std::ostream &operator<<(std::ostream &os, const ManifestHal &hal) {
     return os << hal.format << "/"
               << hal.name << "/"
               << hal.transportArch << "/"
-              << hal.impl.implLevel << "/"
-              << hal.impl.impl << "/"
               << hal.versions;
 }
 

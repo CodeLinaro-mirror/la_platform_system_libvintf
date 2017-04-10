@@ -24,37 +24,53 @@
 #include "MatrixKernel.h"
 #include "MapValueIterator.h"
 #include "Sepolicy.h"
+#include "SchemaType.h"
+#include "Vndk.h"
 
 namespace android {
 namespace vintf {
 
 // Compatibility matrix defines what hardware does the framework requires.
 struct CompatibilityMatrix {
+
+    // Create a framework compatibility matrix.
+    CompatibilityMatrix() : mType(SchemaType::FRAMEWORK) {};
+
     constexpr static Version kVersion{1, 0};
-
-    // Find a MatrixKernel entry that has version v. nullptr if not found.
-    const MatrixKernel *findKernel(const KernelVersion &v) const;
-
-    const Sepolicy &getSepolicy() const;
 
 private:
     bool add(MatrixHal &&hal);
     bool add(MatrixKernel &&kernel);
     void clear();
+
+    // Find a MatrixKernel entry that has version v. nullptr if not found.
+    const MatrixKernel *findKernel(const KernelVersion &v) const;
+
     // Return an iterable to all MatrixHal objects. Call it as follows:
     // for (const MatrixHal &e : cm.getHals()) { }
     ConstMapValueIterable<std::string, MatrixHal> getHals() const;
 
     friend struct HalManifest;
+    friend struct RuntimeInfo;
     friend struct CompatibilityMatrixConverter;
     friend struct LibVintfTest;
+    friend bool operator==(const CompatibilityMatrix &, const CompatibilityMatrix &);
+
+    SchemaType mType;
 
     // sorted map from component name to the entry.
     std::map<std::string, MatrixHal> mHals;
 
-    std::vector<MatrixKernel> mKernels;
+    // entries only for framework compatibility matrix.
+    struct {
+        std::vector<MatrixKernel> mKernels;
+        Sepolicy mSepolicy;
+    } framework;
 
-    Sepolicy mSepolicy;
+    // entries only for device compatibility matrix.
+    struct {
+        Vndk mVndk;
+    } device;
 };
 
 } // namespace vintf

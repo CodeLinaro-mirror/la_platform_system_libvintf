@@ -29,15 +29,13 @@ enum class Transport : size_t {
     EMPTY = 0,
     PASSTHROUGH,
     HWBINDER,
-    TOGGLED,
 };
 
-static const std::array<std::string, 4> gTransportStrings = {
+static const std::array<std::string, 3> gTransportStrings = {
     {
         "",
         "passthrough",
         "hwbinder",
-        "toggled",
     }
 };
 

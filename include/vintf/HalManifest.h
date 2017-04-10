@@ -25,7 +25,9 @@
 
 #include "ManifestHal.h"
 #include "MapValueIterator.h"
+#include "SchemaType.h"
 #include "Version.h"
+#include "Vndk.h"
 
 namespace android {
 namespace vintf {
@@ -40,7 +42,8 @@ public:
     // manifest.version
     constexpr static Version kVersion{1, 0};
 
-    HalManifest() {}
+    // Construct a device HAL manifest.
+    HalManifest() : mType(SchemaType::DEVICE) {}
 
     // Given a component name (e.g. "android.hardware.camera"),
     // return getHal(name)->transport if the component exist and v exactly matches
@@ -91,8 +94,10 @@ public:
 private:
     friend struct HalManifestConverter;
     friend class VintfObject;
+    friend class AssembleVintf;
     friend struct LibVintfTest;
     friend std::string dump(const HalManifest &vm);
+    friend bool operator==(const HalManifest &lft, const HalManifest &rgt);
 
     // clear this manifest.
     inline void clear() { mHals.clear(); }
@@ -103,9 +108,21 @@ private:
 
     status_t fetchAllInformation(const std::string &path);
 
+    SchemaType mType;
+
     // sorted map from component name to the component.
     // The component name looks like: android.hardware.foo
     std::map<std::string, ManifestHal> mHals;
+
+    // entries for device hal manifest only
+    struct {
+        Version mSepolicyVersion;
+    } device;
+
+    // entries for framework hal manifest only
+    struct {
+        std::vector<Vndk> mVndks;
+    } framework;
 };
 
 

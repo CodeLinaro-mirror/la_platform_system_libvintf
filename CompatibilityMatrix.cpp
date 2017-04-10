@@ -26,13 +26,16 @@ bool CompatibilityMatrix::add(MatrixHal &&hal) {
 }
 
 bool CompatibilityMatrix::add(MatrixKernel &&kernel) {
-    mKernels.push_back(std::move(kernel));
+    if (mType != SchemaType::FRAMEWORK) {
+        return false;
+    }
+    framework.mKernels.push_back(std::move(kernel));
     return true;
 }
 
 void CompatibilityMatrix::clear() {
     mHals.clear();
-    mKernels.clear();
+    framework.mKernels.clear();
 }
 
 ConstMapValueIterable<std::string, MatrixHal> CompatibilityMatrix::getHals() const {
@@ -40,7 +43,10 @@ ConstMapValueIterable<std::string, MatrixHal> CompatibilityMatrix::getHals() con
 }
 
 const MatrixKernel *CompatibilityMatrix::findKernel(const KernelVersion &v) const {
-    for (const MatrixKernel &matrixKernel : mKernels) {
+    if (mType != SchemaType::FRAMEWORK) {
+        return nullptr;
+    }
+    for (const MatrixKernel &matrixKernel : framework.mKernels) {
         if (matrixKernel.minLts().version == v.version &&
             matrixKernel.minLts().majorRev == v.majorRev) {
             return matrixKernel.minLts().minorRev <= v.minorRev ? &matrixKernel : nullptr;
@@ -49,8 +55,14 @@ const MatrixKernel *CompatibilityMatrix::findKernel(const KernelVersion &v) cons
     return nullptr;
 }
 
-const Sepolicy &CompatibilityMatrix::getSepolicy() const {
-    return mSepolicy;
+bool operator==(const CompatibilityMatrix &lft, const CompatibilityMatrix &rgt) {
+    return lft.mType == rgt.mType &&
+           lft.mHals == rgt.mHals &&
+           (lft.mType != SchemaType::DEVICE || (
+                lft.device.mVndk == rgt.device.mVndk)) &&
+           (lft.mType != SchemaType::FRAMEWORK || (
+                lft.framework.mKernels == rgt.framework.mKernels &&
+                lft.framework.mSepolicy == rgt.framework.mSepolicy));
 }
 
 } // namespace vintf
