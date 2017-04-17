@@ -42,7 +42,9 @@ namespace vintf {
  * file won't be touched again.
  * If any error, nullptr is returned, and Get will try to parse the HAL manifest
  * again when it is called again.
- * This operation is thread-safe.
+ * All these operations are thread-safe.
+ * If skipCache, always skip the cache in memory and read the files / get runtime information
+ * again from the device.
  */
 class VintfObject {
 public:
@@ -50,20 +52,52 @@ public:
      * Return the API that access the device-side HAL manifest stored
      * in /vendor/manifest.xml.
      */
-    static const HalManifest *GetDeviceHalManifest();
+    static const HalManifest *GetDeviceHalManifest(bool skipCache = false);
 
     /*
      * Return the API that access the framework-side HAL manifest stored
      * in /system/manfiest.xml.
      */
-    static const HalManifest *GetFrameworkHalManifest();
+    static const HalManifest *GetFrameworkHalManifest(bool skipCache = false);
 
     /*
      * Return the API that access device runtime info.
      */
-    static const RuntimeInfo *GetRuntimeInfo();
+    static const RuntimeInfo *GetRuntimeInfo(bool skipCache = false);
+
+    /**
+     * Check compatibility, given a set of manifests / matrices in packageInfo.
+     * They will be checked against the manifests / matrices on the device.
+     *
+     * @param packageInfo a list of XMLs of HalManifest /
+     * CompatibilityMatrix objects.
+     *
+     * @return = 0 if success (compatible)
+     *         > 0 if incompatible
+     *         < 0 if any error (mount partition fails, illformed XML, etc.)
+     */
+    static int32_t CheckCompatibility(
+            const std::vector<std::string> &packageInfo,
+            std::string *error = nullptr);
 };
 
+enum : int32_t {
+    COMPATIBLE = 0,
+    INCOMPATIBLE = 1,
+};
+
+// exposed for testing and VintfObjectRecovery.
+namespace details {
+int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
+        std::function<status_t(void)> mountSystem,
+        std::function<status_t(void)> umountSystem,
+        std::function<status_t(void)> mountVendor,
+        std::function<status_t(void)> umountVendor,
+        std::function<const HalManifest *(bool)> GetFrameworkHalManifest,
+        std::function<const HalManifest *(bool)> GetDeviceHalManifest,
+        std::function<const RuntimeInfo *(bool)> GetRuntimeInfo,
+        std::string *error);
+} // namespace details
 
 } // namespace vintf
 } // namespace android

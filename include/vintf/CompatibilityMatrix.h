@@ -36,19 +36,23 @@ struct CompatibilityMatrix {
     // Create a framework compatibility matrix.
     CompatibilityMatrix() : mType(SchemaType::FRAMEWORK) {};
 
+    SchemaType type() const;
+
     constexpr static Version kVersion{1, 0};
 
 private:
     bool add(MatrixHal &&hal);
     bool add(MatrixKernel &&kernel);
-    void clear();
 
     // Find a MatrixKernel entry that has version v. nullptr if not found.
     const MatrixKernel *findKernel(const KernelVersion &v) const;
 
     // Return an iterable to all MatrixHal objects. Call it as follows:
     // for (const MatrixHal &e : cm.getHals()) { }
-    ConstMapValueIterable<std::string, MatrixHal> getHals() const;
+    ConstMultiMapValueIterable<std::string, MatrixHal> getHals() const;
+
+    // for constructing matrix programitically only.
+    MatrixHal *getAnyHal(const std::string &name);
 
     friend struct HalManifest;
     friend struct RuntimeInfo;
@@ -59,12 +63,13 @@ private:
     SchemaType mType;
 
     // sorted map from component name to the entry.
-    std::map<std::string, MatrixHal> mHals;
+    std::multimap<std::string, MatrixHal> mHals;
 
     // entries only for framework compatibility matrix.
     struct {
         std::vector<MatrixKernel> mKernels;
         Sepolicy mSepolicy;
+        Version mAvbMetaVersion;
     } framework;
 
     // entries only for device compatibility matrix.
