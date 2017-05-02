@@ -46,8 +46,19 @@ struct RuntimeInfo {
     const std::string &osVersion() const;
     // utsname.machine
     const std::string &hardwareId() const;
+    // extract from utsname.release
+    const KernelVersion &kernelVersion() const;
 
+    // files under /vendor/etc/selinux/
     const std::vector<std::string> &sepolicyFilePaths() const;
+
+    const std::map<std::string, std::string> &kernelConfigs() const;
+
+    const Version &bootVbmetaAvbVersion() const;
+    const Version &bootAvbVersion() const;
+
+    // /proc/cpuinfo
+    const std::string &cpuInfo() const;
 
     // /sys/fs/selinux/policyvers
     size_t kernelSepolicyVersion() const;
@@ -82,8 +93,9 @@ private:
     KernelVersion mKernelVersion;
 
     std::vector<std::string> mSepolicyFilePaths;
-    Version mAvbBootVersion;
-    Version mAvbInitVersion;
+    std::string mCpuInfo;
+    Version mBootVbmetaAvbVersion;
+    Version mBootAvbVersion;
 
     size_t mKernelSepolicyVersion;
 

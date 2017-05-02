@@ -78,6 +78,14 @@ std::vector<const ManifestHal *> HalManifest::getHals(const std::string &name) c
     }
     return ret;
 }
+std::vector<ManifestHal *> HalManifest::getHals(const std::string &name) {
+    std::vector<ManifestHal *> ret;
+    auto range = mHals.equal_range(name);
+    for (auto it = range.first; it != range.second; ++it) {
+        ret.push_back(&it->second);
+    }
+    return ret;
+}
 
 Transport HalManifest::getTransport(const std::string &package, const Version &v,
             const std::string &interfaceName, const std::string &instanceName) const {
@@ -249,6 +257,32 @@ bool HalManifest::checkCompatibility(const CompatibilityMatrix &mat, std::string
     }
 
     return true;
+}
+
+CompatibilityMatrix HalManifest::generateCompatibleMatrix() const {
+    CompatibilityMatrix matrix;
+
+    for (const ManifestHal &manifestHal : getHals()) {
+        MatrixHal matrixHal{
+            .format = manifestHal.format,
+            .name = manifestHal.name,
+            .optional = true,
+        };
+        for (const Version &manifestVersion : manifestHal.versions) {
+            matrixHal.versionRanges.push_back({manifestVersion.majorVer, manifestVersion.minorVer});
+        }
+        matrix.add(std::move(matrixHal));
+    }
+    if (mType == SchemaType::FRAMEWORK) {
+        matrix.mType = SchemaType::DEVICE;
+        // VNDK does not need to be added for compatibility
+    } else if (mType == SchemaType::DEVICE) {
+        matrix.mType = SchemaType::FRAMEWORK;
+        matrix.framework.mSepolicy = Sepolicy(0u /* kernelSepolicyVersion */,
+                {{device.mSepolicyVersion.majorVer, device.mSepolicyVersion.minorVer}});
+    }
+
+    return matrix;
 }
 
 status_t HalManifest::fetchAllInformation(const std::string &path) {

@@ -23,9 +23,14 @@
 #include "CompatibilityMatrix.h"
 #include "parse_string.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+
+#include <fstream>
+#include <iostream>
+#include <sstream>
 
 #include <cutils/properties.h>
 #include <selinux/selinux.h>
@@ -134,6 +139,14 @@ void RuntimeInfoFetcher::streamConfig(const char *buf, size_t len) {
 
 status_t RuntimeInfoFetcher::fetchCpuInfo() {
     // TODO implement this; 32-bit and 64-bit has different format.
+    std::ifstream in{"/proc/cpuinfo"};
+    if (!in.is_open()) {
+        LOG(WARNING) << "Cannot read /proc/cpuinfo";
+        return UNKNOWN_ERROR;
+    }
+    std::stringstream sstream;
+    sstream << in.rdbuf();
+    mRuntimeInfo->mCpuInfo = sstream.str();
     return OK;
 }
 
@@ -187,22 +200,43 @@ status_t RuntimeInfoFetcher::parseKernelVersion() {
     return OK;
 }
 
+static const std::string gSepolicyFilesDir{"/vendor/etc/selinux/"};
+
 // Grab sepolicy file paths.
 status_t RuntimeInfoFetcher::fetchSepolicyFiles() {
-    mRuntimeInfo->mSepolicyFilePaths = {
-        // TODO(b/36456394) need a list of sepolicy files
-    };
-    return OK;
+    mRuntimeInfo->mSepolicyFilePaths.clear();
+    DIR *dir = opendir(gSepolicyFilesDir.c_str());
+    if (dir == NULL) {
+        LOG(ERROR) << "Could not open directory \""
+                   << gSepolicyFilesDir << "\"";
+        return -errno;
+    }
+    struct dirent *e;
+    status_t status = OK;
+    errno = 0;
+    while ((e = readdir(dir))) {
+        if (e->d_type == DT_REG || e->d_type == DT_LNK) {
+            mRuntimeInfo->mSepolicyFilePaths.push_back(
+                    gSepolicyFilesDir + e->d_name);
+        }
+    }
+    if (errno != 0) {
+        LOG(ERROR) << "Could not read directory \""
+                   << gSepolicyFilesDir << "\"";
+        status = -errno;
+    }
+    (void)closedir(dir);
+    return status;
 }
 
 status_t RuntimeInfoFetcher::fetchAvb() {
     char prop[PROPERTY_VALUE_MAX];
     property_get("ro.boot.vbmeta.avb_version", prop, "0.0");
-    if (!parse(prop, &mRuntimeInfo->mAvbBootVersion)) {
+    if (!parse(prop, &mRuntimeInfo->mBootVbmetaAvbVersion)) {
         return UNKNOWN_ERROR;
     }
     property_get("ro.boot.avb_version", prop, "0.0");
-    if (!parse(prop, &mRuntimeInfo->mAvbInitVersion)) {
+    if (!parse(prop, &mRuntimeInfo->mBootAvbVersion)) {
         return UNKNOWN_ERROR;
     }
     return OK;
@@ -211,22 +245,22 @@ status_t RuntimeInfoFetcher::fetchAvb() {
 status_t RuntimeInfoFetcher::fetchAllInformation() {
     status_t err;
     if ((err = fetchVersion()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch or parse /proc/version: " << strerror(-err);
     }
     if ((err = fetchKernelConfigs()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch or parse /proc/config.gz: " << strerror(-err);
     }
     if ((err = fetchCpuInfo()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch /proc/cpuinfo: " << strerror(-err);
     }
     if ((err = fetchKernelSepolicyVers()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch kernel sepolicy version: " << strerror(-err);
     }
     if ((err = fetchSepolicyFiles()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch sepolicy file paths: " << strerror(-err);
     }
     if ((err = fetchAvb()) != OK) {
-        return err;
+        LOG(ERROR) << "Cannot fetch sepolicy avb version: " << strerror(-err);
     }
     return OK;
 }
