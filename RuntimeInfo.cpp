@@ -45,17 +45,28 @@ const std::string &RuntimeInfo::hardwareId() const {
     return mHardwareId;
 }
 
+const KernelVersion &RuntimeInfo::kernelVersion() const {
+    return mKernelVersion;
+}
+
+const std::map<std::string, std::string> &RuntimeInfo::kernelConfigs() const {
+    return mKernelConfigs;
+}
+
 size_t RuntimeInfo::kernelSepolicyVersion() const {
     return mKernelSepolicyVersion;
 }
 
-void RuntimeInfo::clear() {
-    mKernelConfigs.clear();
-    mOsName.clear();
-    mNodeName.clear();
-    mOsRelease.clear();
-    mOsVersion.clear();
-    mHardwareId.clear();
+const std::string &RuntimeInfo::cpuInfo() const {
+    return mCpuInfo;
+}
+
+const Version &RuntimeInfo::bootVbmetaAvbVersion() const {
+    return mBootVbmetaAvbVersion;
+}
+
+const Version &RuntimeInfo::bootAvbVersion() const {
+    return mBootAvbVersion;
 }
 
 bool RuntimeInfo::checkCompatibility(const CompatibilityMatrix &mat,
@@ -75,7 +86,7 @@ bool RuntimeInfo::checkCompatibility(const CompatibilityMatrix &mat,
         return false;
     }
 
-    // TODO(b/35217573): check sepolicy version against mat.mSepolicy.sepolicyVersion() here.
+    // mat.mSepolicy.sepolicyVersion() is checked against static HalManifest.device.mSepolicyVersion
 
     const MatrixKernel *matrixKernel = mat.findKernel(this->mKernelVersion);
     if (matrixKernel == nullptr) {
@@ -106,6 +117,28 @@ bool RuntimeInfo::checkCompatibility(const CompatibilityMatrix &mat,
             return false;
         }
     }
+
+    const Version &matAvb = mat.framework.mAvbMetaVersion;
+    if (mBootAvbVersion.majorVer != matAvb.majorVer || mBootAvbVersion.minorVer < matAvb.minorVer) {
+        if (error != nullptr) {
+            std::stringstream ss;
+            ss << "AVB version " << mBootAvbVersion << " does not match framework matrix "
+               << matAvb;
+            *error = ss.str();
+        }
+        return false;
+    }
+    if (mBootVbmetaAvbVersion.majorVer != matAvb.majorVer ||
+        mBootVbmetaAvbVersion.minorVer < matAvb.minorVer) {
+        if (error != nullptr) {
+            std::stringstream ss;
+            ss << "Vbmeta version " << mBootVbmetaAvbVersion << " does not match framework matrix "
+               << matAvb;
+            *error = ss.str();
+        }
+        return false;
+    }
+
     return true;
 }
 

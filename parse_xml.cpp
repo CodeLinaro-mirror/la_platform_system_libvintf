@@ -543,17 +543,17 @@ struct ManifestHalConverter : public XmlNodeConverter<ManifestHal> {
 const ManifestHalConverter manifestHalConverter{};
 
 const XmlTextConverter<KernelSepolicyVersion> kernelSepolicyVersionConverter{"kernel-sepolicy-version"};
-const XmlTextConverter<SepolicyVersion> sepolicyVersionConverter{"sepolicy-version"};
+const XmlTextConverter<VersionRange> sepolicyVersionConverter{"sepolicy-version"};
 
 struct SepolicyConverter : public XmlNodeConverter<Sepolicy> {
     std::string elementName() const override { return "sepolicy"; }
     void mutateNode(const Sepolicy &object, NodeType *root, DocType *d) const override {
         appendChild(root, kernelSepolicyVersionConverter(object.kernelSepolicyVersion(), d));
-        appendChild(root, sepolicyVersionConverter(object.sepolicyVersion(), d));
+        appendChildren(root, sepolicyVersionConverter, object.sepolicyVersions(), d);
     }
     bool buildObject(Sepolicy *object, NodeType *root) const override {
         if (!parseChild(root, kernelSepolicyVersionConverter, &object->mKernelSepolicyVersion) ||
-            !parseChild(root, sepolicyVersionConverter, &object->mSepolicyVersion)) {
+            !parseChildren(root, sepolicyVersionConverter, &object->mSepolicyVersionRanges)) {
             return false;
         }
         return true;
@@ -618,7 +618,8 @@ struct HalManifestConverter : public XmlNodeConverter<HalManifest> {
         }
         if (object->mType == SchemaType::DEVICE) {
             // tags for device hal manifest only.
-            // TODO(b/36456394): should not allow <sepolicy> to be missing.
+            // <sepolicy> can be missing because it can be determined at build time, not hard-coded
+            // in the XML file.
             if (!parseOptionalChild(root, halManifestSepolicyConverter, {},
                     &object->device.mSepolicyVersion)) {
                 return false;
@@ -647,6 +648,18 @@ struct HalManifestConverter : public XmlNodeConverter<HalManifest> {
 
 const HalManifestConverter halManifestConverter{};
 
+const XmlTextConverter<Version> avbVersionConverter{"vbmeta-version"};
+struct AvbConverter : public XmlNodeConverter<Version> {
+    std::string elementName() const override { return "avb"; }
+    void mutateNode(const Version &m, NodeType *root, DocType *d) const override {
+        appendChild(root, avbVersionConverter(m, d));
+    }
+    bool buildObject(Version *object, NodeType *root) const override {
+        return parseChild(root, avbVersionConverter, object);
+    }
+};
+const AvbConverter avbConverter{};
+
 struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatrix> {
     std::string elementName() const override { return "compatibility-matrix"; }
     void mutateNode(const CompatibilityMatrix &m, NodeType *root, DocType *d) const override {
@@ -656,6 +669,9 @@ struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatri
         if (m.mType == SchemaType::FRAMEWORK) {
             appendChildren(root, matrixKernelConverter, m.framework.mKernels, d);
             appendChild(root, sepolicyConverter(m.framework.mSepolicy, d));
+            appendChild(root, avbConverter(m.framework.mAvbMetaVersion, d));
+        } else if (m.mType == SchemaType::DEVICE) {
+            appendChild(root, vndkConverter(m.device.mVndk, d));
         }
     }
     bool buildObject(CompatibilityMatrix *object, NodeType *root) const override {
@@ -668,12 +684,17 @@ struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatri
         }
 
         if (object->mType == SchemaType::FRAMEWORK) {
+            // <avb> and <sepolicy> can be missing because it can be determined at build time, not
+            // hard-coded in the XML file.
             if (!parseChildren(root, matrixKernelConverter, &object->framework.mKernels) ||
-                !parseChild(root, sepolicyConverter, &object->framework.mSepolicy)) {
+                !parseOptionalChild(root, sepolicyConverter, {}, &object->framework.mSepolicy) ||
+                !parseOptionalChild(root, avbConverter, {}, &object->framework.mAvbMetaVersion)) {
                 return false;
             }
         } else if (object->mType == SchemaType::DEVICE) {
-            if (!parseChild(root, vndkConverter, &object->device.mVndk)) {
+            // <vndk> can be missing because it can be determined at build time, not hard-coded
+            // in the XML file.
+            if (!parseOptionalChild(root, vndkConverter, {}, &object->device.mVndk)) {
                 return false;
             }
         }

@@ -21,6 +21,7 @@
 
 #include <map>
 #include <string>
+#include <vector>
 
 #include <utils/Errors.h>
 
@@ -45,11 +46,27 @@ struct RuntimeInfo {
     const std::string &osVersion() const;
     // utsname.machine
     const std::string &hardwareId() const;
+    // extract from utsname.release
+    const KernelVersion &kernelVersion() const;
+
+    const std::map<std::string, std::string> &kernelConfigs() const;
+
+    const Version &bootVbmetaAvbVersion() const;
+    const Version &bootAvbVersion() const;
+
+    // /proc/cpuinfo
+    const std::string &cpuInfo() const;
 
     // /sys/fs/selinux/policyvers
     size_t kernelSepolicyVersion() const;
 
-    // Return whether this kernel works with the given compatibility matrix.
+    // Return whether this RuntimeInfo works with the given compatibility matrix. Return true if:
+    // - mat is a framework compat-mat
+    // - sepolicy.kernel-sepolicy-version == kernelSepolicyVersion()
+    // - /proc/config.gz matches the requirements. Note that /proc/config.gz is read when the
+    //   RuntimeInfo object is created (the first time VintfObject::GetRuntimeInfo is called),
+    //   not when RuntimeInfo::checkCompatibility is called.
+    // - avb-vbmetaversion matches related sysprops
     bool checkCompatibility(const CompatibilityMatrix &mat,
             std::string *error = nullptr) const;
 
@@ -60,7 +77,6 @@ private:
     friend struct LibVintfTest;
     friend std::string dump(const RuntimeInfo &ki);
 
-    void clear();
     status_t fetchAllInformation();
 
     // /proc/config.gz
@@ -72,6 +88,11 @@ private:
     std::string mOsVersion;
     std::string mHardwareId;
     KernelVersion mKernelVersion;
+
+    std::vector<std::string> mSepolicyFilePaths;
+    std::string mCpuInfo;
+    Version mBootVbmetaAvbVersion;
+    Version mBootAvbVersion;
 
     size_t mKernelSepolicyVersion;
 

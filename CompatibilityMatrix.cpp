@@ -16,13 +16,16 @@
 
 #include "CompatibilityMatrix.h"
 
+#include "utils.h"
+
 namespace android {
 namespace vintf {
 
 constexpr Version CompatibilityMatrix::kVersion;
 
 bool CompatibilityMatrix::add(MatrixHal &&hal) {
-    return mHals.emplace(hal.name, std::move(hal)).second;
+    mHals.emplace(hal.name, std::move(hal));
+    return true;
 }
 
 bool CompatibilityMatrix::add(MatrixKernel &&kernel) {
@@ -33,13 +36,16 @@ bool CompatibilityMatrix::add(MatrixKernel &&kernel) {
     return true;
 }
 
-void CompatibilityMatrix::clear() {
-    mHals.clear();
-    framework.mKernels.clear();
+ConstMultiMapValueIterable<std::string, MatrixHal> CompatibilityMatrix::getHals() const {
+    return ConstMultiMapValueIterable<std::string, MatrixHal>(mHals);
 }
 
-ConstMapValueIterable<std::string, MatrixHal> CompatibilityMatrix::getHals() const {
-    return ConstMapValueIterable<std::string, MatrixHal>(mHals);
+MatrixHal *CompatibilityMatrix::getAnyHal(const std::string &name) {
+    auto it = mHals.find(name);
+    if (it == mHals.end()) {
+        return nullptr;
+    }
+    return &(it->second);
 }
 
 const MatrixKernel *CompatibilityMatrix::findKernel(const KernelVersion &v) const {
@@ -55,6 +61,15 @@ const MatrixKernel *CompatibilityMatrix::findKernel(const KernelVersion &v) cons
     return nullptr;
 }
 
+SchemaType CompatibilityMatrix::type() const {
+    return mType;
+}
+
+
+status_t CompatibilityMatrix::fetchAllInformation(const std::string &path) {
+    return details::fetchAllInformation(path, gCompatibilityMatrixConverter, this);
+}
+
 bool operator==(const CompatibilityMatrix &lft, const CompatibilityMatrix &rgt) {
     return lft.mType == rgt.mType &&
            lft.mHals == rgt.mHals &&
@@ -62,7 +77,8 @@ bool operator==(const CompatibilityMatrix &lft, const CompatibilityMatrix &rgt) 
                 lft.device.mVndk == rgt.device.mVndk)) &&
            (lft.mType != SchemaType::FRAMEWORK || (
                 lft.framework.mKernels == rgt.framework.mKernels &&
-                lft.framework.mSepolicy == rgt.framework.mSepolicy));
+                lft.framework.mSepolicy == rgt.framework.mSepolicy &&
+                lft.framework.mAvbMetaVersion == rgt.framework.mAvbMetaVersion));
 }
 
 } // namespace vintf

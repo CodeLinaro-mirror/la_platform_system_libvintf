@@ -54,15 +54,17 @@ public:
     // Given a component name (e.g. "android.hardware.camera"),
     // return a list of version numbers that are supported by the hardware.
     // If the component is not found, empty list is returned.
-    const std::vector<Version> &getSupportedVersions(const std::string &name) const;
+    // If multiple matches, return a concatenation of version entries
+    // (dupes removed)
+    std::set<Version> getSupportedVersions(const std::string &name) const;
 
     // Given a component name (e.g. "android.hardware.camera") and an interface
     // name, return all instance names for that interface.
     // * If the component ("android.hardware.camera") does not exist, return empty list
     // * If the component ("android.hardware.camera") does exist,
-    //    * If the interface (ICamera) does not exist, return {"default"}
+    //    * If the interface (ICamera) does not exist, return empty list
     //    * Else return the list hal.interface.instance
-    const std::set<std::string> &getInstances(
+    std::set<std::string> getInstances(
             const std::string &halName, const std::string &interfaceName) const;
 
     // Convenience method for checking if instanceName is in getInstances(halName, interfaceName)
@@ -70,26 +72,55 @@ public:
             const std::string &interfaceName, const std::string &instanceName) const;
 
     // Return a list of component names that does NOT conform to
-    // the given compatibility matrix. It may contain components that are optional
-    // for the framework.
-    std::vector<std::string> checkIncompatiblity(const CompatibilityMatrix &mat) const;
+    // the given compatibility matrix. It contains components that are optional
+    // for the framework if includeOptional = true.
+    // Note: only HAL entries are checked. To check other entries as well, use
+    // checkCompatibility.
+    std::vector<std::string> checkIncompatibility(const CompatibilityMatrix &mat,
+            bool includeOptional = true) const;
+
+    // Check compatibility against a compatibility matrix. Considered compatible if
+    // - framework manifest vs. device compat-mat
+    //     - checkIncompatibility for HALs returns only optional HALs
+    //     - one of manifest.vndk match compat-mat.vndk
+    // - device manifest vs. framework compat-mat
+    //     - checkIncompatibility for HALs returns only optional HALs
+    //     - manifest.sepolicy.version match one of compat-mat.sepolicy.sepolicy-version
+    bool checkCompatibility(const CompatibilityMatrix &mat, std::string *error = nullptr) const;
+
+    // Generate a compatibility matrix such that checkCompatibility will return true.
+    CompatibilityMatrix generateCompatibleMatrix() const;
 
     // Add an hal to this manifest so that a HalManifest can be constructed programatically.
     bool add(ManifestHal &&hal);
 
-    // Get an HAL component based on the component name. Return nullptr
-    // if the component does not exist. The component name looks like:
-    // android.hardware.foo
-    const ManifestHal *getHal(const std::string &name) const;
-    ManifestHal *getHal(const std::string &name);
-
     // Returns all component names.
     std::set<std::string> getHalNames() const;
+
+    // Returns all component names and versions, e.g.
+    // "android.hardware.camera.device@1.0", "android.hardware.camera.device@3.2",
+    // "android.hardware.nfc@1.0"]
+    std::set<std::string> getHalNamesAndVersions() const;
 
     // Given a component name (e.g. "android.hardware.camera"),
     // return a list of interface names of that component.
     // If the component is not found, empty list is returned.
     std::set<std::string> getInterfaceNames(const std::string &name) const;
+
+    // Type of the manifest. FRAMEWORK or DEVICE.
+    SchemaType type() const;
+
+    // Get all hals with the name
+    std::vector<const ManifestHal *> getHals(const std::string &name) const;
+    std::vector<ManifestHal *> getHals(const std::string &name);
+
+    // device.mSepolicyVersion. Assume type == device.
+    // Abort if type != device.
+    const Version &sepolicyVersion() const;
+
+    // framework.mVndks. Assume type == framework.
+    // Abort if type != framework.
+    const std::vector<Vndk> &vndks() const;
 
 private:
     friend struct HalManifestConverter;
@@ -99,12 +130,16 @@ private:
     friend std::string dump(const HalManifest &vm);
     friend bool operator==(const HalManifest &lft, const HalManifest &rgt);
 
-    // clear this manifest.
-    inline void clear() { mHals.clear(); }
-
     // Return an iterable to all ManifestHal objects. Call it as follows:
     // for (const ManifestHal &e : vm.getHals()) { }
-    ConstMapValueIterable<std::string, ManifestHal> getHals() const;
+    ConstMultiMapValueIterable<std::string, ManifestHal> getHals() const;
+
+    // Get any HAL component based on the component name. Return any one
+    // if multiple. Return nullptr if the component does not exist. This is only
+    // for creating HalManifest objects programatically.
+    // The component name looks like:
+    // android.hardware.foo
+    ManifestHal *getAnyHal(const std::string &name);
 
     status_t fetchAllInformation(const std::string &path);
 
@@ -112,7 +147,7 @@ private:
 
     // sorted map from component name to the component.
     // The component name looks like: android.hardware.foo
-    std::map<std::string, ManifestHal> mHals;
+    std::multimap<std::string, ManifestHal> mHals;
 
     // entries for device hal manifest only
     struct {

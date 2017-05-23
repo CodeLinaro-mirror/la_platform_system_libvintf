@@ -16,11 +16,12 @@
 
 #define LOG_TAG "LibHidlTest"
 
+#include <functional>
+
 #include <vintf/parse_string.h>
 #include <vintf/parse_xml.h>
 #include <vintf/CompatibilityMatrix.h>
-#include <vintf/RuntimeInfo.h>
-#include <vintf/HalManifest.h>
+#include <vintf/VintfObject.h>
 
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
@@ -54,10 +55,30 @@ public:
     void set(CompatibilityMatrix &cm, Sepolicy &&sepolicy) {
         cm.framework.mSepolicy = sepolicy;
     }
-    const ManifestHal *getHal(HalManifest &vm, const std::string &name) {
-        return vm.getHal(name);
+    void set(CompatibilityMatrix &cm, SchemaType type) {
+        cm.mType = type;
     }
-    ConstMapValueIterable<std::string, ManifestHal> getHals(HalManifest &vm) {
+    void set(CompatibilityMatrix &cm, VndkVersionRange &&range, std::set<std::string> &&libs) {
+        cm.device.mVndk.mVersionRange = range;
+        cm.device.mVndk.mLibraries = libs;
+    }
+    void setAvb(RuntimeInfo &ki, Version vbmeta, Version boot) {
+        ki.mBootVbmetaAvbVersion = vbmeta;
+        ki.mBootAvbVersion = boot;
+    }
+    void setAvb(CompatibilityMatrix &cm, Version &&avbVersion) {
+        cm.framework.mAvbMetaVersion = avbVersion;
+    }
+    Version getAvb(CompatibilityMatrix &cm) {
+        return cm.framework.mAvbMetaVersion;
+    }
+    const ManifestHal *getAnyHal(HalManifest &vm, const std::string &name) {
+        return vm.getAnyHal(name);
+    }
+    MatrixHal *getAnyHal(CompatibilityMatrix &cm, const std::string &name) {
+        return cm.getAnyHal(name);
+    }
+    ConstMultiMapValueIterable<std::string, ManifestHal> getHals(HalManifest &vm) {
         return vm.getHals();
     }
     bool isValid(const ManifestHal &mh) {
@@ -127,6 +148,7 @@ public:
             {"CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES", "\"\""},
             {"CONFIG_ILLEGAL_POINTER_VALUE", "0xdead000000000000"}
         };
+        setAvb(info, {2, 1}, {2, 1});
         return info;
     }
 };
@@ -145,6 +167,12 @@ TEST_F(LibVintfTest, Stringify) {
     VersionRange v2;
     EXPECT_TRUE(parse("1.2-3", &v2));
     EXPECT_EQ(v, v2);
+}
+
+TEST_F(LibVintfTest, GetTransport) {
+    HalManifest vm = testDeviceManifest();
+    EXPECT_EQ(Transport::HWBINDER, vm.getTransport("android.hardware.camera",
+            {2, 0}, "ICamera", "default"));
 }
 
 TEST_F(LibVintfTest, HalManifestConverter) {
@@ -243,16 +271,16 @@ TEST_F(LibVintfTest, HalManifestInstances) {
     EXPECT_EQ(vm.getInstances("android.hardware.camera", "IBetterCamera"),
             std::set<std::string>({"camera"}));
     EXPECT_EQ(vm.getInstances("android.hardware.camera", "INotExist"),
-            std::set<std::string>({"default"}));
+            std::set<std::string>({}));
     EXPECT_EQ(vm.getInstances("android.hardware.nfc", "INfc"),
             std::set<std::string>({"default"}));
 
     EXPECT_TRUE(vm.hasInstance("android.hardware.camera", "ICamera", "default"));
     EXPECT_TRUE(vm.hasInstance("android.hardware.camera", "ICamera", "legacy/0"));
     EXPECT_TRUE(vm.hasInstance("android.hardware.camera", "IBetterCamera", "camera"));
-    EXPECT_TRUE(vm.hasInstance("android.hardware.camera", "INotExist", "default"));
     EXPECT_TRUE(vm.hasInstance("android.hardware.nfc", "INfc", "default"));
 
+    EXPECT_FALSE(vm.hasInstance("android.hardware.camera", "INotExist", "default"));
     EXPECT_FALSE(vm.hasInstance("android.hardware.camera", "ICamera", "notexist"));
     EXPECT_FALSE(vm.hasInstance("android.hardware.camera", "IBetterCamera", "default"));
     EXPECT_FALSE(vm.hasInstance("android.hardware.camera", "INotExist", "notexist"));
@@ -380,7 +408,8 @@ TEST_F(LibVintfTest, CompatibilityMatrixCoverter) {
             {KernelConfig{"CONFIG_FOO", Tristate::YES}, KernelConfig{"CONFIG_BAR", "stringvalue"}}}));
     EXPECT_TRUE(add(cm, MatrixKernel{KernelVersion(4, 4, 1),
             {KernelConfig{"CONFIG_BAZ", 20}, KernelConfig{"CONFIG_BAR", KernelConfigRangeValue{3, 5} }}}));
-    set(cm, Sepolicy(30, {1, 3}));
+    set(cm, Sepolicy(30, {{25, 0}, {26, 0, 3}}));
+    setAvb(cm, Version{2, 1});
     std::string xml = gCompatibilityMatrixConverter(cm);
     EXPECT_EQ(xml,
             "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
@@ -416,9 +445,38 @@ TEST_F(LibVintfTest, CompatibilityMatrixCoverter) {
             "    </kernel>\n"
             "    <sepolicy>\n"
             "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
-            "        <sepolicy-version>1-3</sepolicy-version>\n"
+            "        <sepolicy-version>25.0</sepolicy-version>\n"
+            "        <sepolicy-version>26.0-3</sepolicy-version>\n"
             "    </sepolicy>\n"
+            "    <avb>\n"
+            "        <vbmeta-version>2.1</vbmeta-version>\n"
+            "    </avb>\n"
             "</compatibility-matrix>\n");
+    CompatibilityMatrix cm2;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm2, xml));
+    EXPECT_EQ(cm, cm2);
+}
+
+TEST_F(LibVintfTest, DeviceCompatibilityMatrixCoverter) {
+    CompatibilityMatrix cm;
+    EXPECT_TRUE(add(cm, MatrixHal{HalFormat::NATIVE, "android.hidl.manager",
+            {{VersionRange(1,0)}},
+            false /* optional */}));
+    set(cm, SchemaType::DEVICE);
+    set(cm, VndkVersionRange{25,0,1,5}, {"libjpeg.so", "libbase.so"});
+    std::string xml = gCompatibilityMatrixConverter(cm);
+    EXPECT_EQ(xml,
+        "<compatibility-matrix version=\"1.0\" type=\"device\">\n"
+        "    <hal format=\"native\" optional=\"false\">\n"
+        "        <name>android.hidl.manager</name>\n"
+        "        <version>1.0</version>\n"
+        "    </hal>\n"
+        "    <vndk>\n"
+        "        <version>25.0.1-5</version>\n"
+        "        <library>libbase.so</library>\n"
+        "        <library>libjpeg.so</library>\n"
+        "    </vndk>\n"
+        "</compatibility-matrix>\n");
     CompatibilityMatrix cm2;
     EXPECT_TRUE(gCompatibilityMatrixConverter(&cm2, xml));
     EXPECT_EQ(cm, cm2);
@@ -455,8 +513,8 @@ TEST_F(LibVintfTest, HalManifestGetInterfaceNames) {
 
 TEST_F(LibVintfTest, HalManifestGetHal) {
     HalManifest vm = testDeviceManifest();
-    EXPECT_NE(getHal(vm, "android.hardware.camera"), nullptr);
-    EXPECT_EQ(getHal(vm, "non-existent"), nullptr);
+    EXPECT_NE(getAnyHal(vm, "android.hardware.camera"), nullptr);
+    EXPECT_EQ(getAnyHal(vm, "non-existent"), nullptr);
 
     std::vector<std::string> arr{"android.hardware.camera", "android.hardware.nfc"};
     size_t i = 0;
@@ -480,7 +538,8 @@ TEST_F(LibVintfTest, RuntimeInfo) {
     auto testMatrix = [&] (MatrixKernel &&kernel) {
         CompatibilityMatrix cm;
         add(cm, std::move(kernel));
-        set(cm, {30, {1, 3}});
+        set(cm, {30, {{25, 0}}});
+        setAvb(cm, {2, 1});
         return cm;
     };
 
@@ -501,10 +560,10 @@ TEST_F(LibVintfTest, RuntimeInfo) {
     {
         MatrixKernel kernel(KernelVersion{3, 18, 22}, KernelConfigs(configs));
         CompatibilityMatrix cm = testMatrix(std::move(kernel));
-        set(cm, Sepolicy{22, {1, 3}});
+        set(cm, Sepolicy{22, {{25, 0}}});
         EXPECT_FALSE(ki.checkCompatibility(cm, &error))
             << "kernel-sepolicy-version shouldn't match";
-        set(cm, Sepolicy{40, {1, 3}});
+        set(cm, Sepolicy{40, {{25, 0}}});
         EXPECT_FALSE(ki.checkCompatibility(cm, &error))
             << "kernel-sepolicy-version shouldn't match";
     }
@@ -548,6 +607,321 @@ TEST_F(LibVintfTest, RuntimeInfo) {
         CompatibilityMatrix cm = testMatrix(std::move(kernel));
         EXPECT_FALSE(ki.checkCompatibility(cm)) << "Value shouldn't match for integer";
     }
+
+    RuntimeInfo badAvb = testRuntimeInfo();
+    CompatibilityMatrix cm = testMatrix(MatrixKernel(KernelVersion{3, 18, 31}, {}));
+    {
+        setAvb(badAvb, {1, 0}, {2, 1});
+        EXPECT_FALSE(badAvb.checkCompatibility(cm, &error));
+        EXPECT_STREQ(error.c_str(), "Vbmeta version 1.0 does not match framework matrix 2.1");
+    }
+    {
+        setAvb(badAvb, {2, 1}, {3, 0});
+        EXPECT_FALSE(badAvb.checkCompatibility(cm, &error));
+    }
+    {
+        setAvb(badAvb, {2, 1}, {2, 3});
+        EXPECT_TRUE(badAvb.checkCompatibility(cm, &error));
+    }
+    {
+        setAvb(badAvb, {2, 3}, {2, 1});
+        EXPECT_TRUE(badAvb.checkCompatibility(cm, &error));
+    }
+}
+
+TEST_F(LibVintfTest, MissingAvb) {
+    std::string xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.31\"></kernel>"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "</compatibility-matrix>\n";
+    CompatibilityMatrix cm;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml));
+    EXPECT_EQ(getAvb(cm), Version(0, 0));
+}
+
+TEST_F(LibVintfTest, Compat) {
+    std::string manifestXml =
+        "<manifest version=\"1.0\" type=\"device\">\n"
+        "    <hal format=\"hidl\">\n"
+        "        <name>android.hardware.camera</name>\n"
+        "        <transport>hwbinder</transport>\n"
+        "        <version>3.5</version>\n"
+        "        <interface>\n"
+        "            <name>IBetterCamera</name>\n"
+        "            <instance>camera</instance>\n"
+        "        </interface>\n"
+        "        <interface>\n"
+        "            <name>ICamera</name>\n"
+        "            <instance>default</instance>\n"
+        "            <instance>legacy/0</instance>\n"
+        "        </interface>\n"
+        "    </hal>\n"
+        "    <hal format=\"hidl\">\n"
+        "        <name>android.hardware.nfc</name>\n"
+        "        <transport>hwbinder</transport>\n"
+        "        <version>1.0</version>\n"
+        "        <version>2.0</version>\n"
+        "        <interface>\n"
+        "            <name>INfc</name>\n"
+        "            <instance>nfc_nci</instance>\n"
+        "        </interface>\n"
+        "    </hal>\n"
+        "    <hal format=\"hidl\">\n"
+        "        <name>android.hardware.nfc</name>\n"
+        "        <transport>hwbinder</transport>\n"
+        "        <version>2.0</version>\n"
+        "        <interface>\n"
+        "            <name>INfc</name>\n"
+        "            <instance>default</instance>\n"
+        "        </interface>\n"
+        "    </hal>\n"
+        "    <sepolicy>\n"
+        "        <version>25.5</version>\n"
+        "    </sepolicy>\n"
+        "</manifest>\n";
+
+    std::string matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <hal format=\"hidl\" optional=\"false\">\n"
+        "        <name>android.hardware.camera</name>\n"
+        "        <version>2.0-5</version>\n"
+        "        <version>3.4-16</version>\n"
+        "    </hal>\n"
+        "    <hal format=\"hidl\" optional=\"false\">\n"
+        "        <name>android.hardware.nfc</name>\n"
+        "        <version>1.0</version>\n"
+        "        <version>2.0</version>\n"
+        "    </hal>\n"
+        "    <hal format=\"hidl\" optional=\"true\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <version>1.0</version>\n"
+        "    </hal>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "        <sepolicy-version>26.0-3</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb>\n"
+        "        <vbmeta-version>2.1</vbmeta-version>\n"
+        "    </avb>\n"
+        "</compatibility-matrix>\n";
+
+    HalManifest manifest;
+    CompatibilityMatrix matrix;
+    std::string error;
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_TRUE(manifest.checkCompatibility(matrix, &error)) << error;
+
+    // some smaller test cases
+    matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <hal format=\"hidl\" optional=\"false\">\n"
+        "        <name>android.hardware.camera</name>\n"
+        "        <version>3.4</version>\n"
+        "    </hal>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+    matrix = {};
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_TRUE(manifest.checkCompatibility(matrix, &error)) << error;
+    MatrixHal *camera = getAnyHal(matrix, "android.hardware.camera");
+    EXPECT_NE(camera, nullptr);
+    camera->versionRanges[0] = {3, 5};
+    EXPECT_TRUE(manifest.checkCompatibility(matrix, &error)) << error;
+    camera->versionRanges[0] = {3, 6};
+    EXPECT_FALSE(manifest.checkCompatibility(matrix));
+
+    // reset it
+    matrix = {};
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    set(matrix, Sepolicy{30, {{26, 0}}});
+    EXPECT_FALSE(manifest.checkCompatibility(matrix));
+    set(matrix, Sepolicy{30, {{25, 6}}});
+    EXPECT_FALSE(manifest.checkCompatibility(matrix));
+    set(matrix, Sepolicy{30, {{25, 4}}});
+    EXPECT_TRUE(manifest.checkCompatibility(matrix, &error)) << error;
+}
+
+TEST_F(LibVintfTest, Compat2) {
+    std::string deviceManifestXml =
+        "<manifest version=\"1.0\" type=\"device\">\n"
+        "    <sepolicy>\n"
+        "        <version>25.5</version>\n"
+        "    </sepolicy>\n"
+        "</manifest>\n";
+    std::string frameworkManifestXml =
+        "<manifest version=\"1.0\" type=\"framework\">\n"
+        "    <vndk>\n"
+        "        <version>25.0.5</version>\n"
+        "    </vndk>\n"
+        "</manifest>\n";
+    std::string deviceMatrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">\n"
+        "    <vndk>\n"
+        "        <version>25.0.5</version>\n"
+        "    </vndk>\n"
+        "</compatibility-matrix>\n";
+    std::string frameworkMatrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.31\"></kernel>"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb>\n"
+        "        <vbmeta-version>2.1</vbmeta-version>\n"
+        "    </avb>\n"
+        "</compatibility-matrix>\n";
+    RuntimeInfo runtimeInfo = testRuntimeInfo();
+    HalManifest devManifest;
+    HalManifest fwkManifest;
+    CompatibilityMatrix devMatrix;
+    CompatibilityMatrix fwkMatrix;
+    EXPECT_TRUE(gHalManifestConverter(&devManifest, deviceManifestXml));
+    EXPECT_TRUE(gHalManifestConverter(&fwkManifest, frameworkManifestXml));
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&devMatrix, deviceMatrixXml));
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&fwkMatrix, frameworkMatrixXml));
+    std::string error;
+    EXPECT_TRUE(devManifest.checkCompatibility(fwkMatrix, &error)) << error;
+    EXPECT_TRUE(fwkManifest.checkCompatibility(devMatrix, &error)) << error;
+    EXPECT_TRUE(runtimeInfo.checkCompatibility(fwkMatrix, &error)) << error;
+
+    bool systemMounted = false;
+    bool vendorMounted = false;
+    bool systemUmounted = false;
+    bool vendorUmounted = false;
+    auto mountSystem  = [&systemMounted]  () { systemMounted = true;  return OK; };
+    auto mountVendor  = [&vendorMounted]  () { vendorMounted = true;  return OK; };
+    auto umountSystem = [&systemUmounted] () { systemUmounted = true; return OK; };
+    auto umountVendor = [&vendorUmounted] () { vendorUmounted = true; return OK; };
+    auto nullManifestFunc = [](bool) -> const HalManifest * { return nullptr; };
+    auto runtimeInfoFunc = [&](bool) { return &runtimeInfo; };
+    // full OTA
+    EXPECT_EQ(COMPATIBLE, details::checkCompatibility(
+            {deviceManifestXml, deviceMatrixXml, frameworkManifestXml, frameworkMatrixXml},
+            false /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            nullManifestFunc,
+            runtimeInfoFunc,
+            &error)) << error;
+    EXPECT_FALSE(systemMounted);
+    EXPECT_FALSE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_FALSE(vendorUmounted);
+    EXPECT_EQ(COMPATIBLE, details::checkCompatibility(
+            {deviceManifestXml, deviceMatrixXml, frameworkManifestXml, frameworkMatrixXml},
+            true /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            nullManifestFunc,
+            runtimeInfoFunc,
+            &error)) << error;
+    EXPECT_FALSE(systemMounted);
+    EXPECT_FALSE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_FALSE(vendorUmounted);
+
+    // framework only OTA
+    EXPECT_GT(0, details::checkCompatibility(
+            {frameworkManifestXml, frameworkMatrixXml},
+            false /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            nullManifestFunc,
+            runtimeInfoFunc,
+            &error)) << "should not mount, thus info should be missing";
+    EXPECT_FALSE(systemMounted);
+    EXPECT_FALSE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_FALSE(vendorUmounted);
+    EXPECT_EQ(COMPATIBLE, details::checkCompatibility(
+            {frameworkManifestXml, frameworkMatrixXml},
+            true /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            [&](auto) { return &devManifest; },
+            runtimeInfoFunc,
+            &error)) << error;
+    EXPECT_FALSE(systemMounted);
+    EXPECT_TRUE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_TRUE(vendorUmounted);
+
+    CompatibilityMatrix failedFwkMatrix;
+    std::string failedFrameworkMatrixXml;
+
+    // Failed framework only OTA example 1: runtime info doesn't work (avb version)
+    failedFwkMatrix = {};
+    systemMounted = false;
+    vendorMounted = false;
+    failedFrameworkMatrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.31\"></kernel>"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb>\n"
+        "        <vbmeta-version>2.2</vbmeta-version>\n"
+        "    </avb>\n"
+        "</compatibility-matrix>\n";
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&failedFwkMatrix, failedFrameworkMatrixXml));
+    EXPECT_TRUE(devManifest.checkCompatibility(failedFwkMatrix, &error)) << error;
+    EXPECT_FALSE(runtimeInfo.checkCompatibility(failedFwkMatrix, &error)) << error;
+    EXPECT_EQ(INCOMPATIBLE, details::checkCompatibility(
+            {frameworkManifestXml, failedFrameworkMatrixXml},
+            true /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            [&](auto) { return &devManifest; },
+            runtimeInfoFunc,
+            &error)) << error;
+    EXPECT_STREQ(error.c_str(),
+                 "Runtime info and framework compatibility matrix are incompatible: "
+                 "AVB version 2.1 does not match framework matrix 2.2");
+    EXPECT_FALSE(systemMounted);
+    EXPECT_TRUE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_TRUE(vendorUmounted);
+
+    // Failed framework only OTA example 2: unsupported HAL
+    failedFwkMatrix = {};
+    systemMounted = false;
+    vendorMounted = false;
+    failedFrameworkMatrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <hal format=\"hidl\" optional=\"false\">\n"
+        "        <name>android.hardware.camera</name>\n"
+        "        <version>2.0-5</version>\n"
+        "    </hal>\n"
+        "    <kernel version=\"3.18.31\"></kernel>"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.5</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb>\n"
+        "        <vbmeta-version>2.1</vbmeta-version>\n"
+        "    </avb>\n"
+        "</compatibility-matrix>\n";
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&failedFwkMatrix, failedFrameworkMatrixXml));
+    EXPECT_FALSE(devManifest.checkCompatibility(failedFwkMatrix, &error)) << error;
+    EXPECT_TRUE(runtimeInfo.checkCompatibility(failedFwkMatrix, &error)) << error;
+    EXPECT_EQ(INCOMPATIBLE, details::checkCompatibility(
+            {frameworkManifestXml, failedFrameworkMatrixXml},
+            true /* mount */, mountSystem, umountSystem, mountVendor, umountVendor,
+            nullManifestFunc,
+            [&](auto) { return &devManifest; },
+            runtimeInfoFunc,
+            &error)) << error;
+    EXPECT_FALSE(systemMounted);
+    EXPECT_TRUE(vendorMounted);
+    EXPECT_FALSE(systemUmounted);
+    EXPECT_TRUE(vendorUmounted);
 }
 
 } // namespace vintf
