@@ -380,10 +380,12 @@ std::string dump(const RuntimeInfo &ki) {
         << ki.osRelease() << "/"
         << ki.osVersion() << "/"
         << ki.hardwareId() << ";"
-        << ki.mAvbBootVersion << "/"
-        << ki.mAvbInitVersion << ";"
-        << "kernelSepolicyVersion = " << ki.kernelSepolicyVersion() << ";"
-        << "#CONFIG's loaded = " << ki.mKernelConfigs.size() << ";\n";
+        << ki.mBootAvbVersion << "/"
+        << ki.mBootVbmetaAvbVersion << ";"
+        << "kernelSepolicyVersion = " << ki.kernelSepolicyVersion()
+        << ";\n\ncpu info:\n"
+        << ki.cpuInfo()
+        << "\n#CONFIG's loaded = " << ki.mKernelConfigs.size() << ";\n";
     for (const auto &pair : ki.mKernelConfigs) {
         oss << pair.first << "=" << pair.second << "\n";
     }

@@ -18,6 +18,7 @@
 
 #include "CompatibilityMatrix.h"
 #include "parse_xml.h"
+#include "utils.h"
 
 #include <functional>
 #include <memory>
@@ -34,6 +35,8 @@ struct LockedUniquePtr {
 
 static LockedUniquePtr<HalManifest> gDeviceManifest;
 static LockedUniquePtr<HalManifest> gFrameworkManifest;
+static LockedUniquePtr<CompatibilityMatrix> gDeviceMatrix;
+static LockedUniquePtr<CompatibilityMatrix> gFrameworkMatrix;
 static LockedUniquePtr<RuntimeInfo> gDeviceRuntimeInfo;
 
 template <typename T, typename F>
@@ -65,6 +68,21 @@ const HalManifest *VintfObject::GetFrameworkHalManifest(bool skipCache) {
                 "/system/manifest.xml"));
 }
 
+
+// static
+const CompatibilityMatrix *VintfObject::GetDeviceCompatibilityMatrix(bool skipCache) {
+    return Get(&gDeviceMatrix, skipCache,
+            std::bind(&CompatibilityMatrix::fetchAllInformation, std::placeholders::_1,
+                "/vendor/compatibility_matrix.xml"));
+}
+
+// static
+const CompatibilityMatrix *VintfObject::GetFrameworkCompatibilityMatrix(bool skipCache) {
+    return Get(&gFrameworkMatrix, skipCache,
+            std::bind(&CompatibilityMatrix::fetchAllInformation, std::placeholders::_1,
+                "/system/compatibility_matrix.xml"));
+}
+
 // static
 const RuntimeInfo *VintfObject::GetRuntimeInfo(bool skipCache) {
     return Get(&gDeviceRuntimeInfo, skipCache,
@@ -72,10 +90,6 @@ const RuntimeInfo *VintfObject::GetRuntimeInfo(bool skipCache) {
 }
 
 namespace details {
-
-static status_t fakeMountUmount() {
-    return OK;
-}
 
 enum class ParseStatus {
     OK,
@@ -118,7 +132,6 @@ static ParseStatus tryParse(const std::string &xml, const XmlConverter<T> &parse
 template<typename T, typename GetFunction>
 static status_t getMissing(const T *pkg, bool mount,
         std::function<status_t(void)> mountFunction,
-        std::function<status_t(void)> umountFunction,
         const T **updated,
         GetFunction getFunction) {
     if (pkg != nullptr) {
@@ -128,9 +141,6 @@ static status_t getMissing(const T *pkg, bool mount,
             (void)mountFunction(); // ignore mount errors
         }
         *updated = getFunction();
-        if (mount) {
-            (void)umountFunction(); // ignore umount errors
-        }
     }
     return OK;
 }
@@ -159,28 +169,16 @@ struct UpdatedInfo {
     const RuntimeInfo *runtimeInfo;
 };
 
-// Parse all information from package;
-// Get missing information from the device;
-// Do compatibility check.
+// Checks given compatibility info against info on the device. If no
+// compatability info is given then the device info will be checked against
+// itself.
 int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
-        std::function<status_t(void)> mountSystem,
-        std::function<status_t(void)> umountSystem,
-        std::function<status_t(void)> mountVendor,
-        std::function<status_t(void)> umountVendor,
-        std::function<const HalManifest *(bool)> GetFrameworkHalManifest,
-        std::function<const HalManifest *(bool)> GetDeviceHalManifest,
-        std::function<const RuntimeInfo *(bool)> GetRuntimeInfo,
-        std::string *error) {
+        const PartitionMounter &mounter, std::string *error) {
 
     status_t status;
     ParseStatus parseStatus;
     PackageInfo pkg; // All information from package.
     UpdatedInfo updated; // All files and runtime info after the update.
-
-    if (xmls.empty()) {
-        ADD_MESSAGE("nothing to update");
-        return BAD_VALUE;
-    }
 
     // parse all information from package
     for (const auto &xml : xmls) {
@@ -205,20 +203,37 @@ int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
     }
 
     // get missing info from device
-    if ((status = getMissing(pkg.fwk.manifest.get(), mount, mountSystem, umountSystem,
-            &updated.fwk.manifest,
-            std::bind(GetFrameworkHalManifest, true /* skipCache */))) != OK) {
+    // use functions instead of std::bind because std::bind doesn't work well with mock objects
+    auto mountSystem = [&mounter] { return mounter.mountSystem(); };
+    auto mountVendor = [&mounter] { return mounter.mountVendor(); };
+    if ((status = getMissing(
+             pkg.fwk.manifest.get(), mount, mountSystem, &updated.fwk.manifest,
+             std::bind(VintfObject::GetFrameworkHalManifest, true /* skipCache */))) != OK) {
         return status;
     }
-    if ((status = getMissing(pkg.dev.manifest.get(), mount, mountVendor, umountVendor,
-            &updated.dev.manifest,
-            std::bind(GetDeviceHalManifest, true /* skipCache */))) != OK) {
+    if ((status = getMissing(
+             pkg.dev.manifest.get(), mount, mountVendor, &updated.dev.manifest,
+             std::bind(VintfObject::GetDeviceHalManifest, true /* skipCache */))) != OK) {
         return status;
     }
-    updated.runtimeInfo = GetRuntimeInfo(true /* skipCache */);
-    // TODO(b/37321309) get matrices from the device as well.
-    updated.fwk.matrix = pkg.fwk.matrix.get();
-    updated.dev.matrix = pkg.dev.matrix.get();
+    if ((status = getMissing(
+             pkg.fwk.matrix.get(), mount, mountSystem, &updated.fwk.matrix,
+             std::bind(VintfObject::GetFrameworkCompatibilityMatrix, true /* skipCache */))) !=
+        OK) {
+        return status;
+    }
+    if ((status = getMissing(
+             pkg.dev.matrix.get(), mount, mountVendor, &updated.dev.matrix,
+             std::bind(VintfObject::GetDeviceCompatibilityMatrix, true /* skipCache */))) != OK) {
+        return status;
+    }
+
+    if (mount) {
+        (void)mounter.umountSystem(); // ignore errors
+        (void)mounter.umountVendor(); // ignore errors
+    }
+
+    updated.runtimeInfo = VintfObject::GetRuntimeInfo(true /* skipCache */);
 
     // null checks for files and runtime info after the update
     // TODO(b/37321309) if a compat mat is missing, it is not matched and considered compatible.
@@ -247,22 +262,25 @@ int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
     // TODO(b/37321309) outer if checks can be removed if we consider missing matrices as errors.
     if (updated.dev.manifest && updated.fwk.matrix) {
         if (!updated.dev.manifest->checkCompatibility(*updated.fwk.matrix, error)) {
-            error->insert(0, "Device manifest and framework compatibility matrix "
-                             "are incompatible: ");
+            if (error)
+                error->insert(0, "Device manifest and framework compatibility matrix "
+                                 "are incompatible: ");
             return INCOMPATIBLE;
         }
     }
     if (updated.fwk.manifest && updated.dev.matrix) {
         if (!updated.fwk.manifest->checkCompatibility(*updated.dev.matrix, error)) {
-            error->insert(0, "Framework manifest and device compatibility matrix "
-                             "are incompatible: ");
+            if (error)
+                error->insert(0, "Framework manifest and device compatibility matrix "
+                                 "are incompatible: ");
             return INCOMPATIBLE;
         }
     }
     if (updated.runtimeInfo && updated.fwk.matrix) {
         if (!updated.runtimeInfo->checkCompatibility(*updated.fwk.matrix, error)) {
-            error->insert(0, "Runtime info and framework compatibility matrix "
-                             "are incompatible: ");
+            if (error)
+                error->insert(0, "Runtime info and framework compatibility matrix "
+                                 "are incompatible: ");
             return INCOMPATIBLE;
         }
     }
@@ -276,11 +294,7 @@ int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
 int32_t VintfObject::CheckCompatibility(
         const std::vector<std::string> &xmls, std::string *error) {
     return details::checkCompatibility(xmls, false /* mount */,
-            &details::fakeMountUmount, &details::fakeMountUmount,
-            &details::fakeMountUmount, &details::fakeMountUmount,
-            &VintfObject::GetFrameworkHalManifest,
-            &VintfObject::GetDeviceHalManifest,
-            &VintfObject::GetRuntimeInfo,
+            *details::gPartitionMounter,
             error);
 }
 

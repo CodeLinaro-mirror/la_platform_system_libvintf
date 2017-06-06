@@ -17,6 +17,7 @@
 #ifndef ANDROID_VINTF_VINTF_OBJECT_H_
 #define ANDROID_VINTF_VINTF_OBJECT_H_
 
+#include "CompatibilityMatrix.h"
 #include "HalManifest.h"
 #include "RuntimeInfo.h"
 
@@ -61,6 +62,18 @@ public:
     static const HalManifest *GetFrameworkHalManifest(bool skipCache = false);
 
     /*
+     * Return the API that access the device-side compatibility matrix stored
+     * in /vendor/compatibility_matrix.xml.
+     */
+    static const CompatibilityMatrix *GetDeviceCompatibilityMatrix(bool skipCache = false);
+
+    /*
+     * Return the API that access the device-side compatibility matrix stored
+     * in /system/compatibility_matrix.xml.
+     */
+    static const CompatibilityMatrix *GetFrameworkCompatibilityMatrix(bool skipCache = false);
+
+    /*
      * Return the API that access device runtime info.
      */
     static const RuntimeInfo *GetRuntimeInfo(bool skipCache = false);
@@ -88,14 +101,9 @@ enum : int32_t {
 
 // exposed for testing and VintfObjectRecovery.
 namespace details {
+class PartitionMounter;
 int32_t checkCompatibility(const std::vector<std::string> &xmls, bool mount,
-        std::function<status_t(void)> mountSystem,
-        std::function<status_t(void)> umountSystem,
-        std::function<status_t(void)> mountVendor,
-        std::function<status_t(void)> umountVendor,
-        std::function<const HalManifest *(bool)> GetFrameworkHalManifest,
-        std::function<const HalManifest *(bool)> GetDeviceHalManifest,
-        std::function<const RuntimeInfo *(bool)> GetRuntimeInfo,
+        const PartitionMounter& partitionMounter,
         std::string *error);
 } // namespace details
 

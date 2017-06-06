@@ -23,9 +23,14 @@
 #include "CompatibilityMatrix.h"
 #include "parse_string.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+
+#include <fstream>
+#include <iostream>
+#include <sstream>
 
 #include <cutils/properties.h>
 #include <selinux/selinux.h>
@@ -62,7 +67,6 @@ private:
     status_t fetchKernelConfigs();
     status_t fetchCpuInfo();
     status_t fetchKernelSepolicyVers();
-    status_t fetchSepolicyFiles();
     status_t fetchAvb();
     status_t parseKernelVersion();
     RuntimeInfo *mRuntimeInfo;
@@ -134,6 +138,14 @@ void RuntimeInfoFetcher::streamConfig(const char *buf, size_t len) {
 
 status_t RuntimeInfoFetcher::fetchCpuInfo() {
     // TODO implement this; 32-bit and 64-bit has different format.
+    std::ifstream in{"/proc/cpuinfo"};
+    if (!in.is_open()) {
+        LOG(WARNING) << "Cannot read /proc/cpuinfo";
+        return UNKNOWN_ERROR;
+    }
+    std::stringstream sstream;
+    sstream << in.rdbuf();
+    mRuntimeInfo->mCpuInfo = sstream.str();
     return OK;
 }
 
@@ -187,22 +199,14 @@ status_t RuntimeInfoFetcher::parseKernelVersion() {
     return OK;
 }
 
-// Grab sepolicy file paths.
-status_t RuntimeInfoFetcher::fetchSepolicyFiles() {
-    mRuntimeInfo->mSepolicyFilePaths = {
-        // TODO(b/36456394) need a list of sepolicy files
-    };
-    return OK;
-}
-
 status_t RuntimeInfoFetcher::fetchAvb() {
     char prop[PROPERTY_VALUE_MAX];
     property_get("ro.boot.vbmeta.avb_version", prop, "0.0");
-    if (!parse(prop, &mRuntimeInfo->mAvbBootVersion)) {
+    if (!parse(prop, &mRuntimeInfo->mBootVbmetaAvbVersion)) {
         return UNKNOWN_ERROR;
     }
     property_get("ro.boot.avb_version", prop, "0.0");
-    if (!parse(prop, &mRuntimeInfo->mAvbInitVersion)) {
+    if (!parse(prop, &mRuntimeInfo->mBootAvbVersion)) {
         return UNKNOWN_ERROR;
     }
     return OK;
@@ -211,22 +215,19 @@ status_t RuntimeInfoFetcher::fetchAvb() {
 status_t RuntimeInfoFetcher::fetchAllInformation() {
     status_t err;
     if ((err = fetchVersion()) != OK) {
-        return err;
+        LOG(WARNING) << "Cannot fetch or parse /proc/version: " << strerror(-err);
     }
     if ((err = fetchKernelConfigs()) != OK) {
-        return err;
+        LOG(WARNING) << "Cannot fetch or parse /proc/config.gz: " << strerror(-err);
     }
     if ((err = fetchCpuInfo()) != OK) {
-        return err;
+        LOG(WARNING) << "Cannot fetch /proc/cpuinfo: " << strerror(-err);
     }
     if ((err = fetchKernelSepolicyVers()) != OK) {
-        return err;
-    }
-    if ((err = fetchSepolicyFiles()) != OK) {
-        return err;
+        LOG(WARNING) << "Cannot fetch kernel sepolicy version: " << strerror(-err);
     }
     if ((err = fetchAvb()) != OK) {
-        return err;
+        LOG(WARNING) << "Cannot fetch sepolicy avb version: " << strerror(-err);
     }
     return OK;
 }
