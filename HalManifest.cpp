@@ -15,13 +15,14 @@
  */
 
 #define LOG_TAG "libvintf"
+#include <android-base/logging.h>
 
 #include "HalManifest.h"
 
 #include <dirent.h>
-#include <mutex>
 
-#include <android-base/logging.h>
+#include <mutex>
+#include <set>
 
 #include "parse_string.h"
 #include "parse_xml.h"
@@ -33,11 +34,32 @@ namespace vintf {
 
 constexpr Version HalManifest::kVersion;
 
-bool HalManifest::add(ManifestHal &&hal) {
+// Check <version> tag for all <hal> with the same name.
+bool HalManifest::shouldAdd(const ManifestHal& hal) const {
     if (!hal.isValid()) {
         return false;
     }
-    mHals.emplace(hal.name, std::move(hal));
+    auto existingHals = mHals.equal_range(hal.name);
+    std::set<size_t> existingMajorVersions;
+    for (auto it = existingHals.first; it != existingHals.second; ++it) {
+        for (const auto& v : it->second.versions) {
+            // Assume integrity on existingHals, so no check on emplace().second
+            existingMajorVersions.insert(v.majorVer);
+        }
+    }
+    for (const auto& v : hal.versions) {
+        if (!existingMajorVersions.emplace(v.majorVer).second /* no insertion */) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HalManifest::add(ManifestHal&& hal) {
+    if (!shouldAdd(hal)) {
+        return false;
+    }
+    mHals.emplace(hal.name, std::move(hal));  // always succeed
     return true;
 }
 
@@ -155,18 +177,66 @@ bool HalManifest::hasInstance(const std::string &halName,
     return instances.find(instanceName) != instances.end();
 }
 
-static bool isCompatible(const MatrixHal &matrixHal, const ManifestHal &manifestHal) {
-    if (matrixHal.format != manifestHal.format) {
-        return false;
+using InstancesOfVersion = std::map<std::string /* interface */,
+                                    std::set<std::string /* instance */>>;
+using Instances = std::map<Version, InstancesOfVersion>;
+
+static bool satisfyVersion(const MatrixHal& matrixHal, const Version& manifestHalVersion) {
+    for (const VersionRange &matrixVersionRange : matrixHal.versionRanges) {
+        // If Compatibility Matrix says 2.5-2.7, the "2.7" is purely informational;
+        // the framework can work with all 2.5-2.infinity.
+        if (matrixVersionRange.supportedBy(manifestHalVersion)) {
+            return true;
+        }
     }
-    for (const Version &manifestVersion : manifestHal.versions) {
-        for (const VersionRange &matrixVersionRange : matrixHal.versionRanges) {
-            // If Compatibility Matrix says 2.5-2.7, the "2.7" is purely informational;
-            // the framework can work with all 2.5-2.infinity.
-            if (matrixVersionRange.supportedBy(manifestVersion)) {
-                return true;
+    return false;
+}
+
+// Check if matrixHal.interfaces is a subset of instancesOfVersion
+static bool satisfyAllInstances(const MatrixHal& matrixHal,
+        const InstancesOfVersion &instancesOfVersion) {
+    for (const auto& matrixHalInterfacePair : matrixHal.interfaces) {
+        const std::string& interface = matrixHalInterfacePair.first;
+        auto it = instancesOfVersion.find(interface);
+        if (it == instancesOfVersion.end()) {
+            return false;
+        }
+        const std::set<std::string>& manifestInterfaceInstances = it->second;
+        const std::set<std::string>& matrixInterfaceInstances =
+                matrixHalInterfacePair.second.instances;
+        if (!std::includes(manifestInterfaceInstances.begin(), manifestInterfaceInstances.end(),
+                           matrixInterfaceInstances.begin(), matrixInterfaceInstances.end())) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool HalManifest::isCompatible(const MatrixHal& matrixHal) const {
+    Instances instances;
+    // Do the cross product version x interface x instance and sort them,
+    // because interfaces / instances can span in multiple HALs.
+    // This is efficient for small <hal> entries.
+    for (const ManifestHal* manifestHal : getHals(matrixHal.name)) {
+        for (const Version& manifestHalVersion : manifestHal->versions) {
+            instances[manifestHalVersion] = {};
+            for (const auto& halInterfacePair : manifestHal->interfaces) {
+                const std::string& interface = halInterfacePair.first;
+                const auto& toAdd = halInterfacePair.second.instances;
+                instances[manifestHalVersion][interface].insert(toAdd.begin(), toAdd.end());
             }
         }
+    }
+    for (const auto& instanceMapPair : instances) {
+        const Version& manifestHalVersion = instanceMapPair.first;
+        const InstancesOfVersion& instancesOfVersion = instanceMapPair.second;
+        if (!satisfyVersion(matrixHal, manifestHalVersion)) {
+            continue;
+        }
+        if (!satisfyAllInstances(matrixHal, instancesOfVersion)) {
+            continue;
+        }
+        return true; // match!
     }
     return false;
 }
@@ -180,16 +250,8 @@ std::vector<std::string> HalManifest::checkIncompatibility(const CompatibilityMa
             continue;
         }
         // don't check optional; put it in the incompatibility list as well.
-        const std::string &name = matrixHal.name;
-        bool matrixHalSupported = false;
-        for (const ManifestHal *manifestHal : getHals(name)) {
-            matrixHalSupported = isCompatible(matrixHal, *manifestHal);
-            if (matrixHalSupported) {
-                break;
-            }
-        }
-        if (!matrixHalSupported) {
-            incompatible.push_back(name);
+        if (!isCompatible(matrixHal)) {
+            incompatible.push_back(matrixHal.name);
         }
     }
     return incompatible;
@@ -274,6 +336,7 @@ CompatibilityMatrix HalManifest::generateCompatibleMatrix() const {
             .format = manifestHal.format,
             .name = manifestHal.name,
             .optional = true,
+            .interfaces = manifestHal.interfaces
         };
         for (const Version &manifestVersion : manifestHal.versions) {
             matrixHal.versionRanges.push_back({manifestVersion.majorVer, manifestVersion.minorVer});

@@ -32,6 +32,7 @@
 namespace android {
 namespace vintf {
 
+struct MatrixHal;
 struct CompatibilityMatrix;
 
 // A HalManifest is reported by the hardware and query-able from
@@ -130,6 +131,9 @@ private:
     friend std::string dump(const HalManifest &vm);
     friend bool operator==(const HalManifest &lft, const HalManifest &rgt);
 
+    // Check before add()
+    bool shouldAdd(const ManifestHal& toAdd) const;
+
     // Return an iterable to all ManifestHal objects. Call it as follows:
     // for (const ManifestHal &e : vm.getHals()) { }
     ConstMultiMapValueIterable<std::string, ManifestHal> getHals() const;
@@ -142,6 +146,9 @@ private:
     ManifestHal *getAnyHal(const std::string &name);
 
     status_t fetchAllInformation(const std::string &path);
+
+    // Check if all instances in matrixHal is supported in this manifest.
+    bool isCompatible(const MatrixHal& matrixHal) const;
 
     SchemaType mType;
 

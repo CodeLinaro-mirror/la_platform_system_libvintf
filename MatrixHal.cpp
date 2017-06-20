@@ -26,6 +26,8 @@ bool MatrixHal::operator==(const MatrixHal &other) const {
         return false;
     if (versionRanges != other.versionRanges)
         return false;
+    if (interfaces != other.interfaces)
+        return false;
     // do not compare optional
     return true;
 }
