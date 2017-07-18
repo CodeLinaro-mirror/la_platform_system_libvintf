@@ -16,12 +16,14 @@
 
 #define LOG_TAG "LibHidlTest"
 
+#include <algorithm>
 #include <functional>
 
+#include <vintf/CompatibilityMatrix.h>
+#include <vintf/KernelConfigParser.h>
+#include <vintf/VintfObject.h>
 #include <vintf/parse_string.h>
 #include <vintf/parse_xml.h>
-#include <vintf/CompatibilityMatrix.h>
-#include <vintf/VintfObject.h>
 
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
@@ -51,6 +53,14 @@ public:
     }
     bool add(HalManifest &vm, ManifestHal &&hal) {
         return vm.add(std::move(hal));
+    }
+    void addXmlFile(CompatibilityMatrix& cm, std::string name, VersionRange range) {
+        MatrixXmlFile f;
+        f.mName = name;
+        f.mVersionRange = range;
+        f.mFormat = XmlSchemaFormat::DTD;
+        f.mOptional = true;
+        cm.addXmlFile(std::move(f));
     }
     void set(CompatibilityMatrix &cm, Sepolicy &&sepolicy) {
         cm.framework.mSepolicy = sepolicy;
@@ -120,6 +130,14 @@ public:
 
         return vm;
     }
+    HalManifest testDeviceManifestWithXmlFile() {
+        HalManifest vm = testDeviceManifest();
+        ManifestXmlFile xmlFile;
+        xmlFile.mName = "media_profile";
+        xmlFile.mVersion = {1, 0};
+        vm.addXmlFile(std::move(xmlFile));
+        return vm;
+    }
     HalManifest testFrameworkManfiest() {
         HalManifest vm;
         vm.mType = SchemaType::FRAMEWORK;
@@ -163,6 +181,18 @@ public:
     }
 };
 
+TEST_F(LibVintfTest, ArchOperatorOr) {
+    Arch a = Arch::ARCH_EMPTY;
+    a |= Arch::ARCH_32;
+    EXPECT_EQ(Arch::ARCH_32, a);
+
+    a |= Arch::ARCH_64;
+    EXPECT_EQ(Arch::ARCH_32_64, a);
+
+    a = Arch::ARCH_EMPTY;
+    a |= Arch::ARCH_64;
+    EXPECT_EQ(Arch::ARCH_64, a);
+}
 
 TEST_F(LibVintfTest, Stringify) {
     HalManifest vm = testDeviceManifest();
@@ -706,7 +736,8 @@ TEST_F(LibVintfTest, RuntimeInfo) {
         CompatibilityMatrix cm = testMatrix(std::move(kernel));
         EXPECT_FALSE(ki.checkCompatibility(cm)) << "Value shouldn't match for integer";
     }
-
+// TODO(b/38325029) enable avb check when avb version is injected to fwk matrix.
+#if 0
     RuntimeInfo badAvb = testRuntimeInfo();
     CompatibilityMatrix cm = testMatrix(MatrixKernel(KernelVersion{3, 18, 31}, {}));
     {
@@ -726,6 +757,7 @@ TEST_F(LibVintfTest, RuntimeInfo) {
         setAvb(badAvb, {2, 3}, {2, 1});
         EXPECT_TRUE(badAvb.checkCompatibility(cm, &error));
     }
+#endif
 }
 
 TEST_F(LibVintfTest, MissingAvb) {
@@ -1086,6 +1118,312 @@ TEST_F(LibVintfTest, Compat) {
     set(matrix, Sepolicy{30, {{25, 4}}});
     EXPECT_TRUE(manifest.checkCompatibility(matrix, &error)) << error;
 }
+
+/////////////////// xmlfile tests
+
+TEST_F(LibVintfTest, HalManifestConverterXmlFile) {
+    HalManifest vm = testDeviceManifestWithXmlFile();
+    std::string xml = gHalManifestConverter(vm);
+    EXPECT_EQ(xml,
+              "<manifest version=\"1.0\" type=\"device\">\n"
+              "    <hal format=\"hidl\">\n"
+              "        <name>android.hardware.camera</name>\n"
+              "        <transport>hwbinder</transport>\n"
+              "        <version>2.0</version>\n"
+              "        <interface>\n"
+              "            <name>IBetterCamera</name>\n"
+              "            <instance>camera</instance>\n"
+              "        </interface>\n"
+              "        <interface>\n"
+              "            <name>ICamera</name>\n"
+              "            <instance>default</instance>\n"
+              "            <instance>legacy/0</instance>\n"
+              "        </interface>\n"
+              "    </hal>\n"
+              "    <hal format=\"hidl\">\n"
+              "        <name>android.hardware.nfc</name>\n"
+              "        <transport arch=\"32+64\">passthrough</transport>\n"
+              "        <version>1.0</version>\n"
+              "        <interface>\n"
+              "            <name>INfc</name>\n"
+              "            <instance>default</instance>\n"
+              "        </interface>\n"
+              "    </hal>\n"
+              "    <sepolicy>\n"
+              "        <version>25.0</version>\n"
+              "    </sepolicy>\n"
+              "    <xmlfile>\n"
+              "        <name>media_profile</name>\n"
+              "        <version>1.0</version>\n"
+              "    </xmlfile>\n"
+              "</manifest>\n");
+    HalManifest vm2;
+    EXPECT_TRUE(gHalManifestConverter(&vm2, xml));
+    EXPECT_EQ(vm, vm2);
+}
+
+TEST_F(LibVintfTest, CompatibilityMatrixConverterXmlFile) {
+    CompatibilityMatrix cm;
+    addXmlFile(cm, "media_profile", {1, 0});
+    std::string xml = gCompatibilityMatrixConverter(cm);
+    EXPECT_EQ(xml,
+              "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+              "    <sepolicy>\n"
+              "        <kernel-sepolicy-version>0</kernel-sepolicy-version>\n"
+              "    </sepolicy>\n"
+              "    <avb>\n"
+              "        <vbmeta-version>0.0</vbmeta-version>\n"
+              "    </avb>\n"
+              "    <xmlfile format=\"dtd\" optional=\"true\">\n"
+              "        <name>media_profile</name>\n"
+              "        <version>1.0</version>\n"
+              "    </xmlfile>\n"
+              "</compatibility-matrix>\n");
+    CompatibilityMatrix cm2;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm2, xml));
+    EXPECT_EQ(cm, cm2);
+}
+
+TEST_F(LibVintfTest, CompatibilityMatrixConverterXmlFile2) {
+    std::string xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <xmlfile format=\"dtd\" optional=\"false\">\n"
+        "        <name>media_profile</name>\n"
+        "        <version>1.0</version>\n"
+        "    </xmlfile>\n"
+        "</compatibility-matrix>\n";
+    CompatibilityMatrix cm;
+    EXPECT_FALSE(gCompatibilityMatrixConverter(&cm, xml));
+    EXPECT_EQ(
+        "compatibility-matrix.xmlfile entry media_profile has to be optional for "
+        "compatibility matrix version 1.0",
+        gCompatibilityMatrixConverter.lastError());
+}
+
+TEST_F(LibVintfTest, ManifestXmlFilePathDevice) {
+    std::string manifestXml =
+        "<manifest version=\"1.0\" type=\"device\">"
+        "    <xmlfile>"
+        "        <name>media_profile</name>"
+        "        <version>1.0</version>"
+        "    </xmlfile>"
+        "</manifest>";
+    HalManifest manifest;
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_EQ(manifest.getXmlFilePath("media_profile", {1, 0}),
+              "/vendor/etc/media_profile_V1_0.xml");
+}
+
+TEST_F(LibVintfTest, ManifestXmlFilePathFramework) {
+    std::string manifestXml =
+        "<manifest version=\"1.0\" type=\"framework\">"
+        "    <xmlfile>"
+        "        <name>media_profile</name>"
+        "        <version>1.0</version>"
+        "    </xmlfile>"
+        "</manifest>";
+    HalManifest manifest;
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_EQ(manifest.getXmlFilePath("media_profile", {1, 0}),
+              "/system/etc/media_profile_V1_0.xml");
+}
+
+TEST_F(LibVintfTest, ManifestXmlFilePathOverride) {
+    std::string manifestXml =
+        "<manifest version=\"1.0\" type=\"device\">"
+        "    <xmlfile>"
+        "        <name>media_profile</name>"
+        "        <version>1.0</version>"
+        "        <path>/vendor/etc/foo.xml</path>"
+        "    </xmlfile>"
+        "</manifest>";
+    HalManifest manifest;
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_EQ(manifest.getXmlFilePath("media_profile", {1, 0}), "/vendor/etc/foo.xml");
+}
+
+TEST_F(LibVintfTest, ManifestXmlFilePathMissing) {
+    std::string manifestXml =
+        "<manifest version=\"1.0\" type=\"device\">"
+        "    <xmlfile>"
+        "        <name>media_profile</name>"
+        "        <version>1.1</version>"
+        "    </xmlfile>"
+        "</manifest>";
+    HalManifest manifest;
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_EQ(manifest.getXmlFilePath("media_profile", {1, 0}), "");
+}
+
+TEST_F(LibVintfTest, MatrixXmlFilePathFramework) {
+    std::string matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">"
+        "    <xmlfile format=\"dtd\" optional=\"true\">"
+        "        <name>media_profile</name>"
+        "        <version>2.0-1</version>"
+        "    </xmlfile>"
+        "</compatibility-matrix>";
+    CompatibilityMatrix matrix;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_EQ(matrix.getXmlSchemaPath("media_profile", {2, 1}),
+              "/system/etc/media_profile_V2_1.dtd");
+}
+
+TEST_F(LibVintfTest, MatrixXmlFilePathDevice) {
+    std::string matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">"
+        "    <xmlfile format=\"xsd\" optional=\"true\">"
+        "        <name>media_profile</name>"
+        "        <version>2.0-1</version>"
+        "    </xmlfile>"
+        "</compatibility-matrix>";
+    CompatibilityMatrix matrix;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_EQ(matrix.getXmlSchemaPath("media_profile", {2, 0}),
+              "/vendor/etc/media_profile_V2_1.xsd");
+}
+
+TEST_F(LibVintfTest, MatrixXmlFilePathOverride) {
+    std::string matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">"
+        "    <xmlfile format=\"xsd\" optional=\"true\">"
+        "        <name>media_profile</name>"
+        "        <version>2.0-1</version>"
+        "        <path>/system/etc/foo.xsd</path>"
+        "    </xmlfile>"
+        "</compatibility-matrix>";
+    CompatibilityMatrix matrix;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_EQ(matrix.getXmlSchemaPath("media_profile", {2, 0}), "/system/etc/foo.xsd");
+}
+
+TEST_F(LibVintfTest, MatrixXmlFilePathMissing) {
+    std::string matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">"
+        "    <xmlfile format=\"dtd\" optional=\"true\">"
+        "        <name>media_profile</name>"
+        "        <version>2.1</version>"
+        "    </xmlfile>"
+        "</compatibility-matrix>";
+    CompatibilityMatrix matrix;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_EQ(matrix.getXmlSchemaPath("media_profile", {2, 0}), "");
+}
+
+std::pair<KernelConfigParser, status_t> processData(const std::string& data, bool processComments,
+                                                    bool relaxedFormat = false) {
+    KernelConfigParser parser(processComments, relaxedFormat);
+    const char* p = data.c_str();
+    size_t n = 0;
+    size_t chunkSize;
+    status_t status = OK;
+    for (; n < data.size(); p += chunkSize, n += chunkSize) {
+        chunkSize = std::min<size_t>(5, data.size() - n);
+        if ((status = parser.process(p, chunkSize)) != OK) {
+            break;
+        }
+    }
+    return {std::move(parser), status};
+}
+
+TEST_F(LibVintfTest, KernelConfigParser) {
+    // usage in /proc/config.gz
+    const std::string data =
+        "# CONFIG_NOT_SET is not set\n"
+        "CONFIG_ONE=1\n"
+        "CONFIG_Y=y\n"
+        "CONFIG_STR=\"string\"\n";
+    auto pair = processData(data, false /* processComments */);
+    ASSERT_EQ(OK, pair.second) << pair.first.error();
+    const auto& configs = pair.first.configs();
+
+    EXPECT_EQ(configs.find("CONFIG_ONE")->second, "1");
+    EXPECT_EQ(configs.find("CONFIG_Y")->second, "y");
+    EXPECT_EQ(configs.find("CONFIG_STR")->second, "\"string\"");
+    EXPECT_EQ(configs.find("CONFIG_NOT_SET"), configs.end());
+}
+
+TEST_F(LibVintfTest, KernelConfigParser2) {
+    // usage in android-base.cfg
+    const std::string data =
+        "# CONFIG_NOT_SET is not set\n"
+        "CONFIG_ONE=1\n"
+        "CONFIG_Y=y\n"
+        "CONFIG_STR=string\n"
+        "# ignore_thiscomment\n"
+        "# CONFIG_NOT_SET2 is not set\n";
+    auto pair = processData(data, true /* processComments */);
+    ASSERT_EQ(OK, pair.second) << pair.first.error();
+    const auto& configs = pair.first.configs();
+
+    EXPECT_EQ(configs.find("CONFIG_ONE")->second, "1");
+    EXPECT_EQ(configs.find("CONFIG_Y")->second, "y");
+    EXPECT_EQ(configs.find("CONFIG_STR")->second, "string");
+    EXPECT_EQ(configs.find("CONFIG_NOT_SET")->second, "n");
+    EXPECT_EQ(configs.find("CONFIG_NOT_SET2")->second, "n");
+}
+
+TEST_F(LibVintfTest, KernelConfigParserSpace) {
+    // usage in android-base.cfg
+    const std::string data =
+        "   #   CONFIG_NOT_SET is not set   \n"
+        "  CONFIG_ONE=1   # 'tis a one!\n"
+        " CONFIG_TWO=2 #'tis a two!   \n"
+        " CONFIG_THREE=3#'tis a three!   \n"
+        " CONFIG_233=233#'tis a three!   \n"
+        "#yey! random comments\n"
+        "CONFIG_Y=y   \n"
+        " CONFIG_YES=y#YES!   \n"
+        "CONFIG_STR=string\n"
+        "CONFIG_HELLO=hello world!  #still works\n"
+        "CONFIG_WORLD=hello world!       \n"
+        "CONFIG_GOOD   =   good morning!  #comments here\n"
+        "    CONFIG_MORNING   =   good morning!  \n";
+    auto pair = processData(data, true /* processComments */, true /* relaxedFormat */);
+    ASSERT_EQ(OK, pair.second) << pair.first.error();
+    const auto& configs = pair.first.configs();
+
+    EXPECT_EQ(configs.find("CONFIG_ONE")->second, "1");
+    EXPECT_EQ(configs.find("CONFIG_TWO")->second, "2");
+    EXPECT_EQ(configs.find("CONFIG_THREE")->second, "3");
+    EXPECT_EQ(configs.find("CONFIG_Y")->second, "y");
+    EXPECT_EQ(configs.find("CONFIG_STR")->second, "string");
+    EXPECT_EQ(configs.find("CONFIG_HELLO")->second, "hello world!")
+        << "Value should be \"hello world!\" without trailing spaces";
+    EXPECT_EQ(configs.find("CONFIG_WORLD")->second, "hello world!")
+        << "Value should be \"hello world!\" without trailing spaces";
+    EXPECT_EQ(configs.find("CONFIG_GOOD")->second, "good morning!")
+        << "Value should be \"good morning!\" without leading or trailing spaces";
+    EXPECT_EQ(configs.find("CONFIG_MORNING")->second, "good morning!")
+        << "Value should be \"good morning!\" without leading or trailing spaces";
+    EXPECT_EQ(configs.find("CONFIG_NOT_SET")->second, "n");
+}
+
+// Run KernelConfigParserInvalidTest on processComments = {true, false}
+class KernelConfigParserInvalidTest : public ::testing::TestWithParam<bool> {};
+
+TEST_P(KernelConfigParserInvalidTest, NonSet1) {
+    const std::string data = "# CONFIG_NOT_EXIST is not sat\n";
+    auto pair = processData(data, GetParam() /* processComments */, true /* relaxedFormat */);
+    ASSERT_EQ(OK, pair.second) << pair.first.error();
+    const auto& configs = pair.first.configs();
+    EXPECT_EQ(configs.find("CONFIG_NOT_EXIST"), configs.end())
+        << "CONFIG_NOT_EXIST should not exist because of typo";
+}
+
+TEST_P(KernelConfigParserInvalidTest, InvalidLine1) {
+    const std::string data = "FOO_CONFIG=foo\n";
+    ASSERT_NE(OK,
+              processData(data, GetParam() /* processComments */, true /* relaxedFormat */).second);
+}
+
+TEST_P(KernelConfigParserInvalidTest, InvalidLine2) {
+    const std::string data = "CONFIG_BAR-BAZ=foo\n";
+    ASSERT_NE(OK,
+              processData(data, GetParam() /* processComments */, true /* relaxedFormat */).second);
+}
+
+INSTANTIATE_TEST_CASE_P(KernelConfigParser, KernelConfigParserInvalidTest, ::testing::Bool());
 
 } // namespace vintf
 } // namespace android
