@@ -24,8 +24,11 @@
 #include <sstream>
 #include <string>
 
+#include <vintf/KernelConfigParser.h>
 #include <vintf/parse_string.h>
 #include <vintf/parse_xml.h>
+
+#define BUFFER_SIZE sysconf(_SC_PAGESIZE)
 
 namespace android {
 namespace vintf {
@@ -54,6 +57,38 @@ public:
         std::stringstream ss;
         ss << is.rdbuf();
         return ss.str();
+    }
+
+    static bool parseFileForKernelConfigs(const std::string& path, std::vector<KernelConfig>* out) {
+        std::ifstream ifs{path};
+        if (!ifs.is_open()) {
+            std::cerr << "File '" << path << "' does not exist or cannot be read." << std::endl;
+            return false;
+        }
+        KernelConfigParser parser(true /* processComments */, true /* relaxedFormat */);
+        std::string content = read(ifs);
+        status_t err = parser.process(content.c_str(), content.size());
+        if (err != OK) {
+            std::cerr << parser.error();
+            return false;
+        }
+        err = parser.finish();
+        if (err != OK) {
+            std::cerr << parser.error();
+            return false;
+        }
+
+        for (auto& configPair : parser.configs()) {
+            out->push_back({});
+            KernelConfig& config = out->back();
+            config.first = std::move(configPair.first);
+            if (!parseKernelConfigTypedValue(configPair.second, &config.second)) {
+                std::cerr << "Unknown value type for key = '" << config.first << "', value = '"
+                          << configPair.second << "'\n";
+                return false;
+            }
+        }
+        return true;
     }
 
     std::basic_ostream<char>& out() const {
@@ -116,8 +151,32 @@ public:
             if (!getFlag("POLICYVERS", &kernelSepolicyVers)) {
                 return false;
             }
+            for (const auto& pair : mKernels) {
+                std::vector<KernelConfig> configs;
+                if (!parseFileForKernelConfigs(pair.second, &configs)) {
+                    return false;
+                }
+                bool added = false;
+                for (auto& e : matrix->framework.mKernels) {
+                    if (e.minLts() == pair.first) {
+                        e.mConfigs.insert(e.mConfigs.end(), configs.begin(), configs.end());
+                        added = true;
+                        break;
+                    }
+                }
+                if (!added) {
+                    matrix->framework.mKernels.push_back(
+                        MatrixKernel{KernelVersion{pair.first}, std::move(configs)});
+                }
+            }
             matrix->framework.mSepolicy =
                 Sepolicy(kernelSepolicyVers, {{sepolicyVers.majorVer, sepolicyVers.minorVer}});
+
+            Version avbMetaVersion;
+            if (!getFlag("FRAMEWORK_VBMETA_VERSION", &avbMetaVersion)) {
+                return false;
+            }
+            matrix->framework.mAvbMetaVersion = avbMetaVersion;
         }
         out() << gCompatibilityMatrixConverter(*matrix);
         out().flush();
@@ -138,27 +197,54 @@ public:
         return true;
     }
 
+    enum AssembleStatus { SUCCESS, FAIL_AND_EXIT, TRY_NEXT };
+    template <typename Schema, typename AssembleFunc>
+    AssembleStatus tryAssemble(const XmlConverter<Schema>& converter, const std::string& schemaName,
+                               AssembleFunc assemble) {
+        Schema schema;
+        if (!converter(&schema, read(mInFiles.front()))) {
+            return TRY_NEXT;
+        }
+        auto firstType = schema.type();
+        for (auto it = mInFiles.begin() + 1; it != mInFiles.end(); ++it) {
+            Schema additionalSchema;
+            if (!converter(&additionalSchema, read(*it))) {
+                std::cerr << "File \"" << mInFilePaths[std::distance(mInFiles.begin(), it)]
+                          << "\" is not a valid " << firstType << " " << schemaName
+                          << " (but the first file is a valid " << firstType << " " << schemaName
+                          << "). Error: " << converter.lastError() << std::endl;
+                return FAIL_AND_EXIT;
+            }
+            if (additionalSchema.type() != firstType) {
+                std::cerr << "File \"" << mInFilePaths[std::distance(mInFiles.begin(), it)]
+                          << "\" is a " << additionalSchema.type() << " " << schemaName
+                          << " (but a " << firstType << " " << schemaName << " is expected)."
+                          << std::endl;
+                return FAIL_AND_EXIT;
+            }
+            schema.addAll(std::move(additionalSchema));
+        }
+        return assemble(&schema) ? SUCCESS : FAIL_AND_EXIT;
+    }
+
     bool assemble() {
-        if (!mInFile.is_open()) {
+        using std::placeholders::_1;
+        if (mInFiles.empty()) {
             std::cerr << "Missing input file." << std::endl;
             return false;
         }
 
-        std::string fileContent = read(mInFile);
+        auto status = tryAssemble(gHalManifestConverter, "manifest",
+                                  std::bind(&AssembleVintf::assembleHalManifest, this, _1));
+        if (status == SUCCESS) return true;
+        if (status == FAIL_AND_EXIT) return false;
 
-        HalManifest halManifest;
-        if (gHalManifestConverter(&halManifest, fileContent)) {
-            if (assembleHalManifest(&halManifest)) {
-                return true;
-            }
-        }
+        resetInFiles();
 
-        CompatibilityMatrix matrix;
-        if (gCompatibilityMatrixConverter(&matrix, fileContent)) {
-            if (assembleCompatibilityMatrix(&matrix)) {
-                return true;
-            }
-        }
+        status = tryAssemble(gCompatibilityMatrixConverter, "compatibility matrix",
+                             std::bind(&AssembleVintf::assembleCompatibilityMatrix, this, _1));
+        if (status == SUCCESS) return true;
+        if (status == FAIL_AND_EXIT) return false;
 
         std::cerr << "Input file has unknown format." << std::endl
                   << "Error when attempting to convert to manifest: "
@@ -175,8 +261,10 @@ public:
     }
 
     bool openInFile(const char* path) {
-        mInFile.open(path);
-        return mInFile.is_open();
+        mInFilePaths.push_back(path);
+        mInFiles.push_back({});
+        mInFiles.back().open(path);
+        return mInFiles.back().is_open();
     }
 
     bool openCheckFile(const char* path) {
@@ -184,13 +272,39 @@ public:
         return mCheckFile.is_open();
     }
 
+    void resetInFiles() {
+        for (auto& inFile : mInFiles) {
+            inFile.clear();
+            inFile.seekg(0);
+        }
+    }
+
     void setOutputMatrix() { mOutputMatrix = true; }
 
+    bool addKernel(const std::string& kernelArg) {
+        auto ind = kernelArg.find(':');
+        if (ind == std::string::npos) {
+            std::cerr << "Unrecognized --kernel option '" << kernelArg << "'" << std::endl;
+            return false;
+        }
+        std::string kernelVerStr{kernelArg.begin(), kernelArg.begin() + ind};
+        std::string kernelConfigPath{kernelArg.begin() + ind + 1, kernelArg.end()};
+        Version kernelVer;
+        if (!parse(kernelVerStr, &kernelVer)) {
+            std::cerr << "Unrecognized kernel version '" << kernelVerStr << "'" << std::endl;
+            return false;
+        }
+        mKernels.push_back({{kernelVer.majorVer, kernelVer.minorVer, 0u}, kernelConfigPath});
+        return true;
+    }
+
    private:
-    std::ifstream mInFile;
+    std::vector<std::string> mInFilePaths;
+    std::vector<std::ifstream> mInFiles;
     std::unique_ptr<std::ofstream> mOutFileRef;
     std::ifstream mCheckFile;
     bool mOutputMatrix = false;
+    std::vector<std::pair<KernelVersion, std::string>> mKernels;
 };
 
 }  // namespace vintf
@@ -201,11 +315,14 @@ void help() {
                  "    fill in build-time flags into the given file.\n"
                  "assemble_vintf -h\n"
                  "               Display this help text.\n"
-                 "assemble_vintf -i <input file> [-o <output file>] [-m] [-c [<check file>]]\n"
-                 "               [--kernel=<version>:<android-base.cfg>]\n"
+                 "assemble_vintf -i <input file>[:<input file>[...]] [-o <output file>] [-m]\n"
+                 "               [-c [<check file>]]\n"
                  "               Fill in build-time flags into the given file.\n"
-                 "    -i <input file>\n"
-                 "               Input file. Format is automatically detected.\n"
+                 "    -i <input file>[:<input file>[...]]\n"
+                 "               A list of input files. Format is automatically detected for the\n"
+                 "               first file, and the remaining files must have the same format.\n"
+                 "               Files other than the first file should only have <hal> defined;\n"
+                 "               other entries are ignored.\n"
                  "    -o <output file>\n"
                  "               Optional output file. If not specified, write to stdout.\n"
                  "    -m\n"
@@ -219,27 +336,36 @@ void help() {
                  "               If -c is set but the check file is not specified, a warning\n"
                  "               message is written to stderr. Return 0.\n"
                  "               If the check file is specified but is not compatible, an error\n"
-                 "               message is written to stderr. Return 1.\n";
+                 "               message is written to stderr. Return 1.\n"
+                 "    --kernel=<version>:<android-base.cfg>\n"
+                 "               Add a kernel entry to framework compatibility matrix.\n"
+                 "               Ignored for other input format.\n"
+                 "               <version> has format: 3.18\n"
+                 "               <android-base.cfg> is the location of android-base.cfg\n";
 }
 
 int main(int argc, char **argv) {
-    const struct option longopts[] = {{0, 0, 0, 0}};
+    const struct option longopts[] = {{"kernel", required_argument, NULL, 'k'}, {0, 0, 0, 0}};
 
-    std::string inFilePath;
+    std::string outFilePath;
     ::android::vintf::AssembleVintf assembleVintf;
     int res;
     int optind;
     while ((res = getopt_long(argc, argv, "hi:o:mc:", longopts, &optind)) >= 0) {
         switch (res) {
             case 'i': {
-                inFilePath = optarg;
-                if (!assembleVintf.openInFile(optarg)) {
-                    std::cerr << "Failed to open " << optarg << std::endl;
-                    return 1;
+                char* inFilePath = strtok(optarg, ":");
+                while (inFilePath != NULL) {
+                    if (!assembleVintf.openInFile(inFilePath)) {
+                        std::cerr << "Failed to open " << optarg << std::endl;
+                        return 1;
+                    }
+                    inFilePath = strtok(NULL, ":");
                 }
             } break;
 
             case 'o': {
+                outFilePath = optarg;
                 if (!assembleVintf.openOutFile(optarg)) {
                     std::cerr << "Failed to open " << optarg << std::endl;
                     return 1;
@@ -258,7 +384,14 @@ int main(int argc, char **argv) {
                     }
                 } else {
                     std::cerr << "WARNING: no compatibility check is done on "
-                              << inFilePath << std::endl;
+                              << (outFilePath.empty() ? "output" : outFilePath) << std::endl;
+                }
+            } break;
+
+            case 'k': {
+                if (!assembleVintf.addKernel(optarg)) {
+                    std::cerr << "ERROR: Unrecognized --kernel argument." << std::endl;
+                    return 1;
                 }
             } break;
 
