@@ -244,8 +244,8 @@ struct XmlNodeConverter : public XmlConverter<Object> {
         std::string attrText;
         bool ret = getAttr(root, attrName, &attrText) && ::android::vintf::parse(attrText, attr);
         if (!ret) {
-            mLastError = "Could not find/parse attr with name \"" + attrName + "\" for element <"
-                    + elementName() + ">";
+            mLastError = "Could not find/parse attr with name \"" + attrName + "\" and value \"" +
+                         attrText + "\" for element <" + elementName() + ">";
         }
         return ret;
     }
@@ -507,20 +507,73 @@ struct MatrixHalConverter : public XmlNodeConverter<MatrixHal> {
                 return false;
             }
         }
+// Do not check for target-side libvintf to avoid restricting ability for upgrade accidentally.
+#ifdef LIBVINTF_HOST
+        if (!checkAdditionalRestrictionsOnHal(*object)) {
+            return false;
+        }
+#endif
         return true;
     }
+
+#ifdef LIBVINTF_HOST
+   private:
+    bool checkAdditionalRestrictionsOnHal(const MatrixHal& hal) const {
+        if (hal.getName() == "netutils-wrapper") {
+            if (hal.versionRanges.size() != 1) {
+                this->mLastError =
+                    "netutils-wrapper HAL must specify exactly one version x.0, "
+                    "but multiple <version> element is specified.";
+                return false;
+            }
+            const VersionRange& v = hal.versionRanges.at(0);
+            if (!v.isSingleVersion()) {
+                this->mLastError =
+                    "netutils-wrapper HAL must specify exactly one version x.0, "
+                    "but a range is provided. Perhaps you mean '" +
+                    to_string(Version{v.majorVer, 0}) + "'?";
+                return false;
+            }
+            if (v.minMinor != 0) {
+                this->mLastError =
+                    "netutils-wrapper HAL must specify exactly one version x.0, "
+                    "but minor version is not 0. Perhaps you mean '" +
+                    to_string(Version{v.majorVer, 0}) + "'?";
+                return false;
+            }
+        }
+        return true;
+    }
+#endif
 };
 
 const MatrixHalConverter matrixHalConverter{};
+
+struct MatrixKernelConditionsConverter : public XmlNodeConverter<std::vector<KernelConfig>> {
+    std::string elementName() const override { return "conditions"; }
+    void mutateNode(const std::vector<KernelConfig>& conds, NodeType* root,
+                    DocType* d) const override {
+        appendChildren(root, kernelConfigConverter, conds, d);
+    }
+    bool buildObject(std::vector<KernelConfig>* object, NodeType* root) const override {
+        return parseChildren(root, kernelConfigConverter, object);
+    }
+};
+
+const MatrixKernelConditionsConverter matrixKernelConditionsConverter{};
 
 struct MatrixKernelConverter : public XmlNodeConverter<MatrixKernel> {
     std::string elementName() const override { return "kernel"; }
     void mutateNode(const MatrixKernel &kernel, NodeType *root, DocType *d) const override {
         appendAttr(root, "version", kernel.mMinLts);
+        if (!kernel.mConditions.empty()) {
+            appendChild(root, matrixKernelConditionsConverter(kernel.mConditions, d));
+        }
         appendChildren(root, kernelConfigConverter, kernel.mConfigs, d);
     }
     bool buildObject(MatrixKernel *object, NodeType *root) const override {
         if (!parseAttr(root, "version", &object->mMinLts) ||
+            !parseOptionalChild(root, matrixKernelConditionsConverter, {}, &object->mConditions) ||
             !parseChildren(root, kernelConfigConverter, &object->mConfigs)) {
             return false;
         }
@@ -589,8 +642,32 @@ struct ManifestHalConverter : public XmlNodeConverter<ManifestHal> {
             this->mLastError = "'" + object->name + "' is not a valid Manifest HAL.";
             return false;
         }
+// Do not check for target-side libvintf to avoid restricting upgrade accidentally.
+#ifdef LIBVINTF_HOST
+        if (!checkAdditionalRestrictionsOnHal(*object)) {
+            return false;
+        }
+#endif
         return true;
     }
+
+#ifdef LIBVINTF_HOST
+   private:
+    bool checkAdditionalRestrictionsOnHal(const ManifestHal& hal) const {
+        if (hal.getName() == "netutils-wrapper") {
+            for (const Version& v : hal.versions) {
+                if (v.minorVer != 0) {
+                    this->mLastError =
+                        "netutils-wrapper HAL must specify exactly one version x.0, "
+                        "but minor version is not 0. Perhaps you mean '" +
+                        to_string(Version{v.majorVer, 0}) + "'?";
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+#endif
 };
 
 // Convert ManifestHal from and to XML. Returned object is guaranteed to have
@@ -810,6 +887,21 @@ struct CompatibilityMatrixConverter : public XmlNodeConverter<CompatibilityMatri
                 !parseOptionalChild(root, avbConverter, {}, &object->framework.mAvbMetaVersion)) {
                 return false;
             }
+
+            std::set<Version> seenKernelVersions;
+            for (const auto& kernel : object->framework.mKernels) {
+                Version minLts(kernel.minLts().version, kernel.minLts().majorRev);
+                if (seenKernelVersions.find(minLts) != seenKernelVersions.end()) {
+                    continue;
+                }
+                if (!kernel.conditions().empty()) {
+                    this->mLastError = "First <kernel> for version " + to_string(minLts) +
+                                       " must have empty <conditions> for backwards compatibility.";
+                    return false;
+                }
+                seenKernelVersions.insert(minLts);
+            }
+
         } else if (object->mType == SchemaType::DEVICE) {
             // <vndk> can be missing because it can be determined at build time, not hard-coded
             // in the XML file.

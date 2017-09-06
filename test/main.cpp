@@ -39,6 +39,12 @@ extern const XmlConverter<KernelConfigTypedValue> &gKernelConfigTypedValueConver
 extern const XmlConverter<HalManifest> &gHalManifestConverter;
 extern const XmlConverter<CompatibilityMatrix> &gCompatibilityMatrixConverter;
 
+static bool Contains(const std::string& str, const std::string& sub) {
+    return str.find(sub) != std::string::npos;
+}
+#define EXPECT_CONTAINS(str, sub) \
+    EXPECT_TRUE(Contains((str), (sub))) << "Cannot find \"" << (sub) << "\" in \"" << (str) << "\""
+
 struct LibVintfTest : public ::testing::Test {
 public:
     virtual void SetUp() override {
@@ -94,6 +100,7 @@ public:
     bool isValid(const ManifestHal &mh) {
         return mh.isValid();
     }
+    std::vector<MatrixKernel>& getKernels(CompatibilityMatrix& cm) { return cm.framework.mKernels; }
 
     std::map<std::string, HalInterface> testHalInterfaces() {
         HalInterface intf;
@@ -698,6 +705,12 @@ TEST_F(LibVintfTest, RuntimeInfo) {
 
     {
         MatrixKernel kernel(KernelVersion{4, 4, 1}, KernelConfigs(configs));
+        CompatibilityMatrix cm = testMatrix(std::move(kernel));
+        EXPECT_FALSE(ki.checkCompatibility(cm)) << "Kernel version shouldn't match";
+    }
+
+    {
+        MatrixKernel kernel(KernelVersion{3, 18, 60}, KernelConfigs(configs));
         CompatibilityMatrix cm = testMatrix(std::move(kernel));
         EXPECT_FALSE(ki.checkCompatibility(cm)) << "Kernel version shouldn't match";
     }
@@ -1419,6 +1432,473 @@ TEST_F(LibVintfTest, KernelConfigParserSpace) {
     EXPECT_EQ(configs.find("CONFIG_MORNING")->second, "good morning!")
         << "Value should be \"good morning!\" without leading or trailing spaces";
     EXPECT_EQ(configs.find("CONFIG_NOT_SET")->second, "n");
+}
+
+TEST_F(LibVintfTest, NetutilsWrapperMatrix) {
+    std::string matrixXml;
+    CompatibilityMatrix matrix;
+
+    matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">"
+        "    <hal format=\"native\" optional=\"false\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.0</version>"
+        "    </hal>"
+        "</compatibility-matrix>";
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&matrix, matrixXml))
+        << gCompatibilityMatrixConverter.lastError();
+
+// only host libvintf hardcodes netutils-wrapper version requirements
+#ifdef LIBVINTF_HOST
+
+    matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">"
+        "    <hal format=\"native\" optional=\"false\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.0-1</version>"
+        "    </hal>"
+        "</compatibility-matrix>";
+    EXPECT_FALSE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_CONTAINS(
+        gCompatibilityMatrixConverter.lastError(),
+        "netutils-wrapper HAL must specify exactly one version x.0, but a range is provided. "
+        "Perhaps you mean '1.0'?");
+
+    matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">"
+        "    <hal format=\"native\" optional=\"false\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.1</version>"
+        "    </hal>"
+        "</compatibility-matrix>";
+    EXPECT_FALSE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_CONTAINS(
+        gCompatibilityMatrixConverter.lastError(),
+        "netutils-wrapper HAL must specify exactly one version x.0, but minor version is not 0. "
+        "Perhaps you mean '1.0'?");
+
+    matrixXml =
+        "<compatibility-matrix version=\"1.0\" type=\"device\">"
+        "    <hal format=\"native\" optional=\"false\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.0</version>"
+        "        <version>2.0</version>"
+        "    </hal>"
+        "</compatibility-matrix>";
+    EXPECT_FALSE(gCompatibilityMatrixConverter(&matrix, matrixXml));
+    EXPECT_CONTAINS(
+        gCompatibilityMatrixConverter.lastError(),
+        "netutils-wrapper HAL must specify exactly one version x.0, but multiple <version> element "
+        "is specified.");
+
+#endif  // LIBVINTF_HOST
+}
+
+TEST_F(LibVintfTest, NetutilsWrapperManifest) {
+    std::string manifestXml;
+    HalManifest manifest;
+
+    manifestXml =
+        "<manifest version=\"1.0\" type=\"framework\">"
+        "    <hal format=\"native\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.0</version>"
+        "        <version>2.0</version>"
+        "    </hal>"
+        "</manifest>";
+    EXPECT_TRUE(gHalManifestConverter(&manifest, manifestXml)) << gHalManifestConverter.lastError();
+
+// only host libvintf hardcodes netutils-wrapper version requirements
+#ifdef LIBVINTF_HOST
+
+    manifestXml =
+        "<manifest version=\"1.0\" type=\"framework\">"
+        "    <hal format=\"native\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.1</version>"
+        "    </hal>"
+        "</manifest>";
+    EXPECT_FALSE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_CONTAINS(
+        gCompatibilityMatrixConverter.lastError(),
+        "netutils-wrapper HAL must specify exactly one version x.0, but multiple <version> element "
+        "is specified.");
+
+    manifestXml =
+        "<manifest version=\"1.0\" type=\"framework\">"
+        "    <hal format=\"native\">"
+        "        <name>netutils-wrapper</name>"
+        "        <version>1.0</version>"
+        "        <version>2.1</version>"
+        "    </hal>"
+        "</manifest>";
+    EXPECT_FALSE(gHalManifestConverter(&manifest, manifestXml));
+    EXPECT_CONTAINS(
+        gCompatibilityMatrixConverter.lastError(),
+        "netutils-wrapper HAL must specify exactly one version x.0, but multiple <version> element "
+        "is specified.");
+
+#endif  // LIBVINTF_HOST
+}
+
+TEST_F(LibVintfTest, KernelConfigConditionTest) {
+    std::string xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARM</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_FOO</key>\n"
+        "            <value type=\"tristate\">y</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "        <sepolicy-version>25.0</sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb>\n"
+        "        <vbmeta-version>2.1</vbmeta-version>\n"
+        "    </avb>\n"
+        "</compatibility-matrix>\n";
+
+    CompatibilityMatrix cm;
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    const auto& kernels = getKernels(cm);
+    ASSERT_GE(kernels.size(), 2u);
+    ASSERT_TRUE(kernels[0].conditions().empty());
+    const auto& kernel = kernels[1];
+    const auto& cond = kernel.conditions();
+    ASSERT_FALSE(cond.empty());
+    EXPECT_EQ("CONFIG_ARM", cond.begin()->first);
+    EXPECT_EQ(KernelConfigTypedValue(Tristate::YES), cond.begin()->second);
+    EXPECT_FALSE(kernel.configs().empty());
+
+    EXPECT_EQ(xml, gCompatibilityMatrixConverter(cm));
+}
+
+TEST_F(LibVintfTest, KernelConfigConditionEmptyTest) {
+    std::string xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"4.4.0\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARM</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "    </kernel>\n"
+        "</compatibility-matrix>\n";
+
+    CompatibilityMatrix cm;
+    EXPECT_FALSE(gCompatibilityMatrixConverter(&cm, xml))
+        << "Should not accept first kernel version with non-empty conditions";
+    EXPECT_EQ(
+        "First <kernel> for version 3.18 must have empty <conditions> "
+        "for backwards compatibility.",
+        gCompatibilityMatrixConverter.lastError());
+}
+
+TEST_F(LibVintfTest, KernelConfigConditionMatch) {
+    RuntimeInfo runtime = testRuntimeInfo();
+    std::string error;
+    std::string xml;
+    CompatibilityMatrix cm;
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "            <value type=\"int\">24</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_TRUE(runtime.checkCompatibility(cm, &error)) << error;
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "            <value type=\"int\">26</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_FALSE(runtime.checkCompatibility(cm, &error))
+        << "conditions met, so CONFIG_ARCH_MMAP_RND_BITS should not match";
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">n</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "            <value type=\"int\">26</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_TRUE(runtime.checkCompatibility(cm, &error)) << error;
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">24</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xdead000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_TRUE(runtime.checkCompatibility(cm, &error));
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">24</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xbeaf000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_FALSE(runtime.checkCompatibility(cm, &error))
+        << "conditions have 'and' relationship, so CONFIG_ILLEGAL_POINTER_VALUE should not match";
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\"/>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">26</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xbeaf000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_TRUE(runtime.checkCompatibility(cm, &error)) << error;
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <config>\n"
+        "            <key>CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES</key>\n"
+        "            <value type=\"string\"/>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xdead000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">24</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ANDROID_BINDER_DEVICES</key>\n"
+        "            <value type=\"string\">binder,hwbinder</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_TRUE(runtime.checkCompatibility(cm, &error)) << error;
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <config>\n"
+        "            <key>CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES</key>\n"
+        "            <value type=\"string\"/>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xbeaf000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">24</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ANDROID_BINDER_DEVICES</key>\n"
+        "            <value type=\"string\">binder,hwbinder</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_FALSE(runtime.checkCompatibility(cm, &error)) << "all fragments should be used.";
+
+    xml =
+        "<compatibility-matrix version=\"1.0\" type=\"framework\">\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <config>\n"
+        "            <key>CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE_NAMES</key>\n"
+        "            <value type=\"string\"/>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_64BIT</key>\n"
+        "                <value type=\"tristate\">y</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ILLEGAL_POINTER_VALUE</key>\n"
+        "            <value type=\"int\">0xdead000000000000</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <kernel version=\"3.18.22\">\n"
+        "        <conditions>\n"
+        "            <config>\n"
+        "                <key>CONFIG_ARCH_MMAP_RND_BITS</key>\n"
+        "                <value type=\"int\">24</value>\n"
+        "            </config>\n"
+        "        </conditions>\n"
+        "        <config>\n"
+        "            <key>CONFIG_ANDROID_BINDER_DEVICES</key>\n"
+        "            <value type=\"string\">binder</value>\n"
+        "        </config>\n"
+        "    </kernel>\n"
+        "    <sepolicy>\n"
+        "        <kernel-sepolicy-version>30</kernel-sepolicy-version>\n"
+        "    </sepolicy>\n"
+        "    <avb><vbmeta-version>2.1</vbmeta-version></avb>\n"
+        "</compatibility-matrix>\n";
+
+    EXPECT_TRUE(gCompatibilityMatrixConverter(&cm, xml))
+        << gCompatibilityMatrixConverter.lastError();
+    EXPECT_FALSE(runtime.checkCompatibility(cm, &error)) << "all fragments should be used";
 }
 
 // Run KernelConfigParserInvalidTest on processComments = {true, false}
