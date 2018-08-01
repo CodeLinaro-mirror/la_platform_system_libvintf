@@ -299,39 +299,62 @@ class AssembleVintfImpl : public AssembleVintf {
     using HalManifests = Schemas<HalManifest>;
     using CompatibilityMatrices = Schemas<CompatibilityMatrix>;
 
+    template <typename M>
+    void outputInputs(const Schemas<M>& inputs) {
+        out() << "<!--" << std::endl;
+        out() << "    Input:" << std::endl;
+        for (const auto& e : inputs) {
+            if (!e.name.empty()) {
+                out() << "        " << base::Basename(e.name) << std::endl;
+            }
+        }
+        out() << "-->" << std::endl;
+    }
+
     bool assembleHalManifest(HalManifests* halManifests) {
         std::string error;
         HalManifest* halManifest = &halManifests->front().object;
         for (auto it = halManifests->begin() + 1; it != halManifests->end(); ++it) {
             const std::string& path = it->name;
-            HalManifest& halToAdd = it->object;
+            HalManifest& manifestToAdd = it->object;
 
-            if (halToAdd.level() != Level::UNSPECIFIED) {
+            if (manifestToAdd.level() != Level::UNSPECIFIED) {
                 if (halManifest->level() == Level::UNSPECIFIED) {
-                    halManifest->mLevel = halToAdd.level();
-                } else if (halManifest->level() != halToAdd.level()) {
+                    halManifest->mLevel = manifestToAdd.level();
+                } else if (halManifest->level() != manifestToAdd.level()) {
                     std::cerr << "Inconsistent FCM Version in HAL manifests:" << std::endl
                               << "    File '" << halManifests->front().name << "' has level "
                               << halManifest->level() << std::endl
-                              << "    File '" << path << "' has level " << halToAdd.level()
+                              << "    File '" << path << "' has level " << manifestToAdd.level()
                               << std::endl;
                     return false;
                 }
             }
 
-            if (!halManifest->addAllHals(&halToAdd, &error)) {
+            // TODO(b/78943004): add everything
+            if (!halManifest->addAllHals(&manifestToAdd, &error)) {
                 std::cerr << "File \"" << path << "\" cannot be added: conflict on HAL \"" << error
                           << "\" with an existing HAL. See <hal> with the same name "
                           << "in previously parsed files or previously declared in this file."
                           << std::endl;
                 return false;
             }
+
+            // Check that manifestToAdd is empty.
+            if (!manifestToAdd.empty()) {
+                std::cerr << "File \"" << path << "\" contains extraneous entries and attributes. "
+                          << "This is currently unsupported (b/78943004); it can only contain "
+                          << "<hal>s and attribute \"type\". Only the first input "
+                          << "file to assemble_vintf can contain other things. "
+                          << "Remaining entries and attributes are:" << std::endl
+                          << gHalManifestConverter(manifestToAdd);
+                return false;
+            }
         }
 
         if (halManifest->mType == SchemaType::DEVICE) {
-            if (!getFlag("BOARD_SEPOLICY_VERS", &halManifest->device.mSepolicyVersion)) {
-                return false;
-            }
+            (void)getFlagIfUnset("BOARD_SEPOLICY_VERS", &halManifest->device.mSepolicyVersion);
+
             if (!setDeviceFcmVersion(halManifest)) {
                 return false;
             }
@@ -346,6 +369,8 @@ class AssembleVintfImpl : public AssembleVintf {
                 halManifest->framework.mSystemSdk.mVersions.emplace(std::move(v));
             }
         }
+
+        outputInputs(*halManifests);
 
         if (mOutputMatrix) {
             CompatibilityMatrix generatedMatrix = halManifest->generateCompatibleMatrix();
@@ -530,16 +555,8 @@ class AssembleVintfImpl : public AssembleVintf {
                            deviceLevel == Level::UNSPECIFIED /* log */);
             getFlagIfUnset("FRAMEWORK_VBMETA_VERSION", &matrix->framework.mAvbMetaVersion,
                            deviceLevel == Level::UNSPECIFIED /* log */);
-
-            out() << "<!--" << std::endl;
-            out() << "    Input:" << std::endl;
-            for (const auto& e : *matrices) {
-                if (!e.name.empty()) {
-                    out() << "        " << base::Basename(e.name) << std::endl;
-                }
-            }
-            out() << "-->" << std::endl;
         }
+        outputInputs(*matrices);
         out() << gCompatibilityMatrixConverter(*matrix, mSerializeFlags);
         out().flush();
 

@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "FileSystem.h"
 #include "HalGroup.h"
 #include "Level.h"
 #include "ManifestHal.h"
@@ -119,6 +120,12 @@ struct HalManifest : public HalGroup<ManifestHal>, public XmlFileGroup<ManifestX
     bool hasInstance(const std::string& halName, const Version& version,
                      const std::string& interfaceName, const std::string& instance) const;
 
+    // Insert the given instance. After inserting it, the instance will be available via
+    // forEachInstance* functions. This modifies the manifest.
+    // Return whether this operation is successful.
+    bool insertInstance(const FqInstance& fqInstance, Transport transport, Arch arch, HalFormat fmt,
+                        std::string* error = nullptr);
+
    protected:
     // Check before add()
     bool shouldAdd(const ManifestHal& toAdd) const override;
@@ -132,7 +139,8 @@ struct HalManifest : public HalGroup<ManifestHal>, public XmlFileGroup<ManifestX
     friend std::string dump(const HalManifest &vm);
     friend bool operator==(const HalManifest &lft, const HalManifest &rgt);
 
-    status_t fetchAllInformation(const std::string& path, std::string* error = nullptr);
+    status_t fetchAllInformation(const FileSystem* fileSystem, const std::string& path,
+                                 std::string* error = nullptr);
 
     details::Instances expandInstances(const std::string& name) const;
     // Check if all instances in matrixHal is supported in this manifest.
@@ -152,6 +160,9 @@ struct HalManifest : public HalGroup<ManifestHal>, public XmlFileGroup<ManifestX
     // That is, return empty list iff
     // (instance in manifest) => (instance in matrix).
     std::set<std::string> checkUnusedHals(const CompatibilityMatrix& mat) const;
+
+    // Check that manifest has no entries.
+    bool empty() const;
 
     SchemaType mType;
     Level mLevel = Level::UNSPECIFIED;

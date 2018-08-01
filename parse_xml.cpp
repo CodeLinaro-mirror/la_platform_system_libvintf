@@ -393,8 +393,9 @@ struct XmlTextConverter : public XmlNodeConverter<Object> {
     virtual bool buildObject(Object* object, NodeType* root, std::string* error) const override {
         return this->parseText(root, object, error);
     }
-    virtual std::string elementName() const { return mElementName; };
-private:
+    virtual std::string elementName() const { return mElementName; }
+
+   private:
     std::string mElementName;
 };
 
@@ -704,6 +705,12 @@ struct ManifestHalConverter : public XmlNodeConverter<ManifestHal> {
         std::set<FqInstance> fqInstances;
         if (!parseChildren(root, fqInstanceConverter, &fqInstances, error)) {
             return false;
+        }
+        for (const auto& e : fqInstances) {
+            if (e.hasPackage()) {
+                *error = "Should not specify package: \"" + e.string() + "\"";
+                return false;
+            }
         }
         if (!object->insertInstances(fqInstances, error)) {
             return false;

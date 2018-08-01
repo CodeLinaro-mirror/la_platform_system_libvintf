@@ -360,8 +360,9 @@ CompatibilityMatrix HalManifest::generateCompatibleMatrix() const {
     return matrix;
 }
 
-status_t HalManifest::fetchAllInformation(const std::string& path, std::string* error) {
-    return details::fetchAllInformation(path, gHalManifestConverter, this, error);
+status_t HalManifest::fetchAllInformation(const FileSystem* fileSystem, const std::string& path,
+                                          std::string* error) {
+    return details::fetchAllInformation(fileSystem, path, gHalManifestConverter, this, error);
 }
 
 SchemaType HalManifest::type() const {
@@ -444,6 +445,29 @@ bool HalManifest::hasInstance(const std::string& halName, const Version& version
                                          return !found;  // if not found, continue
                                      });
     return found;
+}
+
+bool HalManifest::insertInstance(const FqInstance& fqInstance, Transport transport, Arch arch,
+                                 HalFormat format, std::string* error) {
+    for (ManifestHal& hal : getHals()) {
+        if (hal.name == fqInstance.getPackage() && hal.format == format &&
+            hal.transport() == transport && hal.arch() == arch) {
+            return hal.insertInstance(fqInstance, error);
+        }
+    }
+
+    ManifestHal hal;
+    hal.name = fqInstance.getPackage();
+    hal.format = format;
+    hal.transportArch = TransportArch(transport, arch);
+    if (!hal.insertInstance(fqInstance, error)) return false;
+    return add(std::move(hal));
+}
+
+bool HalManifest::empty() const {
+    HalManifest emptyManifest;
+    emptyManifest.setType(type());
+    return (*this) == emptyManifest;
 }
 
 } // namespace vintf
