@@ -39,8 +39,8 @@ namespace android {
 namespace vintf {
 
 static const std::string gConfigPrefix = "android-base-";
-static const std::string gConfigSuffix = ".cfg";
-static const std::string gBaseConfig = "android-base.cfg";
+static const std::string gConfigSuffix = ".config";
+static const std::string gBaseConfig = "android-base.config";
 
 // An input stream with a name.
 // The input stream may be an actual file, or a stringstream for testing.
@@ -89,11 +89,13 @@ class AssembleVintfImpl : public AssembleVintf {
     }
 
     template <typename T>
-    bool getFlag(const std::string& key, T* value) const {
+    bool getFlag(const std::string& key, T* value, bool log = true) const {
         std::string envValue = getEnv(key);
         if (envValue.empty()) {
-            std::cerr << "Warning: " << key << " is missing, defaulted to " << (*value) << "."
-                      << std::endl;
+            if (log) {
+                std::cerr << "Warning: " << key << " is missing, defaulted to " << (*value) << "."
+                          << std::endl;
+            }
             return true;
         }
 
@@ -193,7 +195,8 @@ class AssembleVintfImpl : public AssembleVintf {
             }
             std::cerr << "'" << fname << "' (in " << path
                       << ") is not a valid kernel config file name. Must match regex: "
-                      << "android-base(-[0-9a-zA-Z-]+)?\\.cfg" << std::endl;
+                      << "android-base(-[0-9a-zA-Z-]+)?\\" << gConfigSuffix
+                      << std::endl;
             return nullptr;
         }
         sub.insert(0, "CONFIG_");
@@ -250,7 +253,7 @@ class AssembleVintfImpl : public AssembleVintf {
         }
 
         if (!foundCommonConfig) {
-            std::cerr << "No android-base.cfg is found in these paths:" << std::endl;
+            std::cerr << "No " << gBaseConfig << " is found in these paths:" << std::endl;
             for (auto& namedStream : *streams) {
                 std::cerr << "    " << namedStream.name() << std::endl;
             }
@@ -342,12 +345,15 @@ class AssembleVintfImpl : public AssembleVintf {
 
             // Check that manifestToAdd is empty.
             if (!manifestToAdd.empty()) {
-                std::cerr << "File \"" << path << "\" contains extraneous entries and attributes. "
-                          << "This is currently unsupported (b/78943004); it can only contain "
-                          << "<hal>s and attribute \"type\". Only the first input "
-                          << "file to assemble_vintf can contain other things. "
-                          << "Remaining entries and attributes are:" << std::endl
-                          << gHalManifestConverter(manifestToAdd);
+                std::cerr
+                    << "File \"" << path << "\" contains extraneous entries and attributes. "
+                    << "This is currently unsupported (b/78943004); it can only contain "
+                    << "<hal>s and attribute \"type\" and \"version\". Only the first input "
+                    << "file to assemble_vintf can contain other things. "
+                    << "Remaining entries and attributes are:" << std::endl
+                    << gHalManifestConverter(
+                           manifestToAdd,
+                           SerializeFlags::EVERYTHING.disableMetaVersion().disableSchemaType());
                 return false;
             }
         }
@@ -555,6 +561,9 @@ class AssembleVintfImpl : public AssembleVintf {
                            deviceLevel == Level::UNSPECIFIED /* log */);
             getFlagIfUnset("FRAMEWORK_VBMETA_VERSION", &matrix->framework.mAvbMetaVersion,
                            deviceLevel == Level::UNSPECIFIED /* log */);
+            // Hard-override existing AVB version
+            getFlag("FRAMEWORK_VBMETA_VERSION_OVERRIDE", &matrix->framework.mAvbMetaVersion,
+                    false /* log */);
         }
         outputInputs(*matrices);
         out() << gCompatibilityMatrixConverter(*matrix, mSerializeFlags);
@@ -666,14 +675,29 @@ class AssembleVintfImpl : public AssembleVintf {
     void setOutputMatrix() override { mOutputMatrix = true; }
 
     bool setHalsOnly() override {
-        if (mSerializeFlags) return false;
-        mSerializeFlags |= SerializeFlag::HALS_ONLY;
+        if (mHasSetHalsOnlyFlag) {
+            std::cerr << "Error: Cannot set --hals-only with --no-hals." << std::endl;
+            return false;
+        }
+        // Just override it with HALS_ONLY because other flags that modify mSerializeFlags
+        // does not interfere with this (except --no-hals).
+        mSerializeFlags = SerializeFlags::HALS_ONLY;
+        mHasSetHalsOnlyFlag = true;
         return true;
     }
 
     bool setNoHals() override {
-        if (mSerializeFlags) return false;
-        mSerializeFlags |= SerializeFlag::NO_HALS;
+        if (mHasSetHalsOnlyFlag) {
+            std::cerr << "Error: Cannot set --hals-only with --no-hals." << std::endl;
+            return false;
+        }
+        mSerializeFlags = mSerializeFlags.disableHals();
+        mHasSetHalsOnlyFlag = true;
+        return true;
+    }
+
+    bool setNoKernelRequirements() override {
+        mSerializeFlags = mSerializeFlags.disableKernelConfigs().disableKernelMinorRevision();
         return true;
     }
 
@@ -682,7 +706,8 @@ class AssembleVintfImpl : public AssembleVintf {
     Ostream mOutRef;
     Istream mCheckFile;
     bool mOutputMatrix = false;
-    SerializeFlags mSerializeFlags = SerializeFlag::EVERYTHING;
+    bool mHasSetHalsOnlyFlag = false;
+    SerializeFlags::Type mSerializeFlags = SerializeFlags::EVERYTHING;
     std::map<KernelVersion, std::vector<NamedIstream>> mKernels;
     std::map<std::string, std::string> mFakeEnv;
 };
