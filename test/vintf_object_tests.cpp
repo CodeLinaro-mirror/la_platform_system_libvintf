@@ -401,11 +401,12 @@ class VintfObjectTestBase : public ::testing::Test {
     }
 
     virtual void SetUp() {
-        vintfObject =
-            std::make_unique<VintfObject>(std::make_unique<NiceMock<MockFileSystem>>(),
-                                          std::make_unique<NiceMock<MockRuntimeInfoFactory>>(
-                                              std::make_shared<NiceMock<MockRuntimeInfo>>()),
-                                          std::make_unique<NiceMock<MockPropertyFetcher>>());
+        vintfObject = VintfObject::Builder()
+                          .setFileSystem(std::make_unique<NiceMock<MockFileSystem>>())
+                          .setRuntimeInfoFactory(std::make_unique<NiceMock<MockRuntimeInfoFactory>>(
+                              std::make_shared<NiceMock<MockRuntimeInfo>>()))
+                          .setPropertyFetcher(std::make_unique<NiceMock<MockPropertyFetcher>>())
+                          .build();
     }
     virtual void TearDown() {
         Mock::VerifyAndClear(&fetcher());
@@ -774,6 +775,10 @@ bool containsOdmProductManifest(const std::shared_ptr<const HalManifest>& p) {
 
 class DeviceManifestTest : public VintfObjectTestBase {
    protected:
+    virtual void SetUp() {
+        VintfObjectTestBase::SetUp();
+        setFakeProperties();
+    }
 
     // Expect that /vendor/etc/vintf/manifest.xml is fetched.
     void expectVendorManifest() { expectFetch(kVendorManifest, vendorEtcManifest); }
