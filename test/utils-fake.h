@@ -16,6 +16,8 @@
 
 #include <gmock/gmock.h>
 
+#include <vintf/ObjectFactory.h>
+#include <vintf/PropertyFetcher.h>
 #include "utils.h"
 
 using ::testing::_;
@@ -68,13 +70,10 @@ class MockRuntimeInfoFactory : public ObjectFactory<RuntimeInfo> {
 
 class MockPropertyFetcher : public PropertyFetcher {
    public:
-    MockPropertyFetcher();
+    MockPropertyFetcher() = default;
     MOCK_CONST_METHOD2(getProperty, std::string(const std::string&, const std::string&));
     MOCK_CONST_METHOD2(getBoolProperty, bool(const std::string&, bool));
     MOCK_CONST_METHOD3(getUintProperty, uint64_t(const std::string&, uint64_t, uint64_t));
-
-   private:
-    PropertyFetcherImpl real_;
 };
 
 }  // namespace details
