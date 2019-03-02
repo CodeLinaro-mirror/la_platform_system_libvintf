@@ -24,15 +24,14 @@
 #include "FileSystem.h"
 #include "HalManifest.h"
 #include "Named.h"
+#include "ObjectFactory.h"
+#include "PropertyFetcher.h"
 #include "RuntimeInfo.h"
 
 namespace android {
 namespace vintf {
 
 namespace details {
-template <typename T>
-class ObjectFactory;
-class PropertyFetcher;
 class VintfObjectAfterUpdate;
 
 template <typename T>
@@ -79,17 +78,6 @@ class VintfObjectCompatibleTest;
  */
 class VintfObject {
    public:
-    /**
-     * A VintfObject that fetches from root and cache results, unless skipCache is specified.
-     * Dependencies can be injected via arguments. If nullptr is provided, the default behavior
-     * is used.
-     * - FileSystem fetch from "/" for target and fetch no files for host
-     * - ObjectFactory<RuntimeInfo> fetches default RuntimeInfo for target and nothing for host
-     * - PropertyFetcher fetches properties for target and nothing for host
-     */
-    VintfObject(std::unique_ptr<FileSystem>&& = nullptr,
-                std::unique_ptr<details::ObjectFactory<RuntimeInfo>>&& = nullptr,
-                std::unique_ptr<details::PropertyFetcher>&& = nullptr);
     virtual ~VintfObject() = default;
 
     /*
@@ -149,7 +137,7 @@ class VintfObject {
      *         < 0 if any error (mount partition fails, illformed XML, etc.)
      */
     int32_t checkCompatibility(std::string* error = nullptr,
-                               CheckFlags::Type flags = CheckFlags::ENABLE_ALL_CHECKS);
+                               CheckFlags::Type flags = CheckFlags::DEFAULT);
 
     /**
      * A std::function that abstracts a list of "provided" instance names. Given package, version
@@ -189,9 +177,9 @@ class VintfObject {
     int32_t checkDeprecation(std::string* error = nullptr);
 
    private:
-    const std::unique_ptr<FileSystem> mFileSystem;
-    const std::unique_ptr<details::ObjectFactory<RuntimeInfo>> mRuntimeInfoFactory;
-    const std::unique_ptr<details::PropertyFetcher> mPropertyFetcher;
+    std::unique_ptr<FileSystem> mFileSystem;
+    std::unique_ptr<ObjectFactory<RuntimeInfo>> mRuntimeInfoFactory;
+    std::unique_ptr<PropertyFetcher> mPropertyFetcher;
 
     details::LockedSharedPtr<HalManifest> mDeviceManifest;
     details::LockedSharedPtr<HalManifest> mFrameworkManifest;
@@ -216,8 +204,8 @@ class VintfObject {
 
    protected:
     virtual const std::unique_ptr<FileSystem>& getFileSystem();
-    virtual const std::unique_ptr<details::PropertyFetcher>& getPropertyFetcher();
-    virtual const std::unique_ptr<details::ObjectFactory<RuntimeInfo>>& getRuntimeInfoFactory();
+    virtual const std::unique_ptr<PropertyFetcher>& getPropertyFetcher();
+    virtual const std::unique_ptr<ObjectFactory<RuntimeInfo>>& getRuntimeInfoFactory();
 
    public:
     /*
@@ -285,7 +273,7 @@ class VintfObject {
      */
     static int32_t CheckCompatibility(const std::vector<std::string>& packageInfo,
                                       std::string* error = nullptr,
-                                      CheckFlags::Type flags = CheckFlags::ENABLE_ALL_CHECKS);
+                                      CheckFlags::Type flags = CheckFlags::DEFAULT);
 
     /**
      * Check deprecation on framework matrices with a provided predicate.
@@ -317,8 +305,10 @@ class VintfObject {
 
     status_t getCombinedFrameworkMatrix(const std::shared_ptr<const HalManifest>& deviceManifest,
                                         CompatibilityMatrix* out, std::string* error = nullptr);
-    std::vector<Named<CompatibilityMatrix>> getAllFrameworkMatrixLevels(
-        std::string* error = nullptr);
+    status_t getAllFrameworkMatrixLevels(std::vector<Named<CompatibilityMatrix>>* out,
+                                         std::string* error = nullptr);
+    status_t getOneMatrix(const std::string& path, Named<CompatibilityMatrix>* out,
+                          std::string* error = nullptr);
     status_t addDirectoryManifests(const std::string& directory, HalManifest* manifests,
                                    std::string* error = nullptr);
     status_t fetchDeviceHalManifest(HalManifest* out, std::string* error = nullptr);
@@ -330,7 +320,7 @@ class VintfObject {
     // Helper to CheckCompatibility with dependency injection.
     int32_t checkCompatibility(const std::vector<std::string>& packageInfo,
                                std::string* error = nullptr,
-                               CheckFlags::Type flags = CheckFlags::ENABLE_ALL_CHECKS);
+                               CheckFlags::Type flags = CheckFlags::DEFAULT);
 
     static bool IsHalDeprecated(const MatrixHal& oldMatrixHal,
                                 const CompatibilityMatrix& targetMatrix,
@@ -338,6 +328,29 @@ class VintfObject {
     static bool IsInstanceDeprecated(const MatrixInstance& oldMatrixInstance,
                                      const CompatibilityMatrix& targetMatrix,
                                      const ListInstances& listInstances, std::string* error);
+
+   public:
+    /**
+     * Builder of VintfObject. If a dependency is not specified, the default behavior is used.
+     * - FileSystem fetch from "/" for target and fetch no files for host
+     * - ObjectFactory<RuntimeInfo> fetches default RuntimeInfo for target and nothing for host
+     * - PropertyFetcher fetches properties for target and nothing for host
+     */
+    class Builder {
+       public:
+        Builder();
+        Builder& setFileSystem(std::unique_ptr<FileSystem>&&);
+        Builder& setRuntimeInfoFactory(std::unique_ptr<ObjectFactory<RuntimeInfo>>&&);
+        Builder& setPropertyFetcher(std::unique_ptr<PropertyFetcher>&&);
+        std::unique_ptr<VintfObject> build();
+
+       private:
+        std::unique_ptr<VintfObject> mObject;
+    };
+
+   private:
+    /* Empty VintfObject without any dependencies. Used by Builder. */
+    VintfObject() = default;
 };
 
 enum : int32_t {
@@ -354,12 +367,14 @@ namespace details {
 extern const std::string kSystemVintfDir;
 extern const std::string kVendorVintfDir;
 extern const std::string kOdmVintfDir;
+extern const std::string kProductVintfDir;
 extern const std::string kOdmLegacyVintfDir;
 extern const std::string kOdmLegacyManifest;
 extern const std::string kVendorManifest;
 extern const std::string kSystemManifest;
 extern const std::string kVendorMatrix;
 extern const std::string kOdmManifest;
+extern const std::string kProductMatrix;
 extern const std::string kVendorManifestFragmentDir;
 extern const std::string kSystemManifestFragmentDir;
 extern const std::string kOdmManifestFragmentDir;
