@@ -162,19 +162,35 @@ class AssembleVintfImpl : public AssembleVintf {
         return ss.str();
     }
 
+    // Return true if name of file is "android-base.config". This file must be specified
+    // exactly once for each kernel version. These requirements do not have any conditions.
     static bool isCommonConfig(const std::string& path) {
         return ::android::base::Basename(path) == gBaseConfig;
     }
 
+    // Return true if name of file matches "android-base-foo.config".
+    // Zero or more conditional configs may be specified for each kernel version. These
+    // requirements are conditional on CONFIG_FOO=y.
+    static bool isConditionalConfig(const std::string& path) {
+        auto fname = ::android::base::Basename(path);
+        return ::android::base::StartsWith(fname, gConfigPrefix) &&
+               ::android::base::EndsWith(fname, gConfigSuffix);
+    }
+
+    // Return true for all other file names (i.e. not android-base.config, and not conditional
+    // configs.)
+    // Zero or more conditional configs may be specified for each kernel version.
+    // These requirements do not have any conditions.
+    static bool isExtraCommonConfig(const std::string& path) {
+        return !isCommonConfig(path) && !isConditionalConfig(path);
+    }
+
     // nullptr on any error, otherwise the condition.
     static Condition generateCondition(const std::string& path) {
-        std::string fname = ::android::base::Basename(path);
-        if (fname.size() <= gConfigPrefix.size() + gConfigSuffix.size() ||
-            !std::equal(gConfigPrefix.begin(), gConfigPrefix.end(), fname.begin()) ||
-            !std::equal(gConfigSuffix.rbegin(), gConfigSuffix.rend(), fname.rbegin())) {
+        if (!isConditionalConfig(path)) {
             return nullptr;
         }
-
+        auto fname = ::android::base::Basename(path);
         std::string sub = fname.substr(gConfigPrefix.size(),
                                        fname.size() - gConfigPrefix.size() - gConfigSuffix.size());
         if (sub.empty()) {
@@ -229,12 +245,22 @@ class AssembleVintfImpl : public AssembleVintf {
         bool ret = true;
 
         for (auto& namedStream : *streams) {
-            if (isCommonConfig(namedStream.name())) {
-                ret &= parseFileForKernelConfigs(namedStream.stream(), &commonConfig.second);
-                foundCommonConfig = true;
+            if (isCommonConfig(namedStream.name()) || isExtraCommonConfig(namedStream.name())) {
+                if (!parseFileForKernelConfigs(namedStream.stream(), &commonConfig.second)) {
+                    std::cerr << "Failed to generate common configs for file "
+                              << namedStream.name();
+                    ret = false;
+                }
+                if (isCommonConfig(namedStream.name())) {
+                    foundCommonConfig = true;
+                }
             } else {
                 Condition condition = generateCondition(namedStream.name());
-                ret &= (condition != nullptr);
+                if (condition == nullptr) {
+                    std::cerr << "Failed to generate conditional configs for file "
+                              << namedStream.name();
+                    ret = false;
+                }
 
                 std::vector<KernelConfig> kernelConfigs;
                 if ((ret &= parseFileForKernelConfigs(namedStream.stream(), &kernelConfigs)))
@@ -247,8 +273,8 @@ class AssembleVintfImpl : public AssembleVintf {
             for (auto& namedStream : *streams) {
                 std::cerr << "    " << namedStream.name() << std::endl;
             }
+            ret = false;
         }
-        ret &= foundCommonConfig;
         // first element is always common configs (no conditions).
         out->insert(out->begin(), std::move(commonConfig));
         return ret;
@@ -262,25 +288,6 @@ class AssembleVintfImpl : public AssembleVintf {
             std::string error;
             if (!manifest.checkCompatibility(matrix, &error, mCheckFlags)) {
                 std::cerr << "Not compatible: " << error << std::endl;
-                return false;
-            }
-        }
-
-        // Check HALs in device manifest that are not in framework matrix.
-        if (getBooleanFlag("VINTF_ENFORCE_NO_UNUSED_HALS")) {
-            auto unused = manifest.checkUnusedHals(matrix);
-            if (!unused.empty()) {
-                std::cerr << "Error: The following instances are in the device manifest but "
-                          << "not specified in framework compatibility matrix: " << std::endl
-                          << "    " << android::base::Join(unused, "\n    ") << std::endl
-                          << "Suggested fix:" << std::endl
-                          << "1. Check for any typos in device manifest or framework compatibility "
-                          << "matrices with FCM version >= " << matrix.level() << "." << std::endl
-                          << "2. Add them to any framework compatibility matrix with FCM "
-                          << "version >= " << matrix.level() << " where applicable." << std::endl
-                          << "3. Add them to DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE "
-                          << "or DEVICE_PRODUCT_COMPATIBILITY_MATRIX_FILE." << std::endl;
-
                 return false;
             }
         }
