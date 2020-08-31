@@ -48,10 +48,10 @@ static constexpr bool kIsTarget = false;
 #endif
 
 template <typename T, typename F>
-static std::shared_ptr<const T> Get(const char* id, LockedSharedPtr<T>* ptr, bool skipCache,
+static std::shared_ptr<const T> Get(const char* id, LockedSharedPtr<T>* ptr,
                                     const F& fetchAllInformation) {
     std::unique_lock<std::mutex> _lock(ptr->mutex);
-    if (skipCache || !ptr->fetchedOnce) {
+    if (!ptr->fetchedOnce) {
         LOG(INFO) << id << ": Reading VINTF information.";
         ptr->object = std::make_unique<T>();
         std::string error;
@@ -99,53 +99,50 @@ std::shared_ptr<VintfObject> VintfObject::GetInstance() {
     return sInstance.object;
 }
 
-std::shared_ptr<const HalManifest> VintfObject::GetDeviceHalManifest(bool skipCache) {
-    return GetInstance()->getDeviceHalManifest(skipCache);
+std::shared_ptr<const HalManifest> VintfObject::GetDeviceHalManifest() {
+    return GetInstance()->getDeviceHalManifest();
 }
 
-std::shared_ptr<const HalManifest> VintfObject::getDeviceHalManifest(bool skipCache) {
-    return Get(__func__, &mDeviceManifest, skipCache,
+std::shared_ptr<const HalManifest> VintfObject::getDeviceHalManifest() {
+    return Get(__func__, &mDeviceManifest,
                std::bind(&VintfObject::fetchDeviceHalManifest, this, _1, _2));
 }
 
-std::shared_ptr<const HalManifest> VintfObject::GetFrameworkHalManifest(bool skipCache) {
-    return GetInstance()->getFrameworkHalManifest(skipCache);
+std::shared_ptr<const HalManifest> VintfObject::GetFrameworkHalManifest() {
+    return GetInstance()->getFrameworkHalManifest();
 }
 
-std::shared_ptr<const HalManifest> VintfObject::getFrameworkHalManifest(bool skipCache) {
-    return Get(__func__, &mFrameworkManifest, skipCache,
+std::shared_ptr<const HalManifest> VintfObject::getFrameworkHalManifest() {
+    return Get(__func__, &mFrameworkManifest,
                std::bind(&VintfObject::fetchFrameworkHalManifest, this, _1, _2));
 }
 
-std::shared_ptr<const CompatibilityMatrix> VintfObject::GetDeviceCompatibilityMatrix(bool skipCache) {
-    return GetInstance()->getDeviceCompatibilityMatrix(skipCache);
+std::shared_ptr<const CompatibilityMatrix> VintfObject::GetDeviceCompatibilityMatrix() {
+    return GetInstance()->getDeviceCompatibilityMatrix();
 }
 
-std::shared_ptr<const CompatibilityMatrix> VintfObject::getDeviceCompatibilityMatrix(
-    bool skipCache) {
-    return Get(__func__, &mDeviceMatrix, skipCache,
-               std::bind(&VintfObject::fetchDeviceMatrix, this, _1, _2));
+std::shared_ptr<const CompatibilityMatrix> VintfObject::getDeviceCompatibilityMatrix() {
+    return Get(__func__, &mDeviceMatrix, std::bind(&VintfObject::fetchDeviceMatrix, this, _1, _2));
 }
 
-std::shared_ptr<const CompatibilityMatrix> VintfObject::GetFrameworkCompatibilityMatrix(bool skipCache) {
-    return GetInstance()->getFrameworkCompatibilityMatrix(skipCache);
+std::shared_ptr<const CompatibilityMatrix> VintfObject::GetFrameworkCompatibilityMatrix() {
+    return GetInstance()->getFrameworkCompatibilityMatrix();
 }
 
-std::shared_ptr<const CompatibilityMatrix> VintfObject::getFrameworkCompatibilityMatrix(
-    bool skipCache) {
+std::shared_ptr<const CompatibilityMatrix> VintfObject::getFrameworkCompatibilityMatrix() {
     // To avoid deadlock, get device manifest before any locks.
     auto deviceManifest = getDeviceHalManifest();
 
     std::unique_lock<std::mutex> _lock(mFrameworkCompatibilityMatrixMutex);
 
     auto combined =
-        Get(__func__, &mCombinedFrameworkMatrix, skipCache,
+        Get(__func__, &mCombinedFrameworkMatrix,
             std::bind(&VintfObject::getCombinedFrameworkMatrix, this, deviceManifest, _1, _2));
     if (combined != nullptr) {
         return combined;
     }
 
-    return Get(__func__, &mFrameworkMatrix, skipCache,
+    return Get(__func__, &mFrameworkMatrix,
                std::bind(&CompatibilityMatrix::fetchAllInformation, _1, getFileSystem().get(),
                          kSystemLegacyMatrix, _2));
 }
@@ -153,7 +150,7 @@ std::shared_ptr<const CompatibilityMatrix> VintfObject::getFrameworkCompatibilit
 status_t VintfObject::getCombinedFrameworkMatrix(
     const std::shared_ptr<const HalManifest>& deviceManifest, CompatibilityMatrix* out,
     std::string* error) {
-    std::vector<Named<CompatibilityMatrix>> matrixFragments;
+    std::vector<CompatibilityMatrix> matrixFragments;
     auto matrixFragmentsStatus = getAllFrameworkMatrixLevels(&matrixFragments, error);
     if (matrixFragmentsStatus != OK) {
         return matrixFragmentsStatus;
@@ -182,8 +179,8 @@ status_t VintfObject::getCombinedFrameworkMatrix(
     if (deviceLevel == Level::UNSPECIFIED) {
         // Cannot infer FCM version. Combine all matrices by assuming
         // Shipping FCM Version == min(all supported FCM Versions in the framework)
-        for (auto&& pair : matrixFragments) {
-            Level fragmentLevel = pair.object.level();
+        for (auto&& fragment : matrixFragments) {
+            Level fragmentLevel = fragment.level();
             if (fragmentLevel != Level::UNSPECIFIED && deviceLevel > fragmentLevel) {
                 deviceLevel = fragmentLevel;
             }
@@ -226,7 +223,7 @@ status_t VintfObject::addDirectoryManifests(const std::string& directory, HalMan
 
         if (!manifest->addAll(&fragmentManifest, error)) {
             if (error) {
-                error->insert(0, "Cannot add manifest fragment " + directory + file + ":");
+                error->insert(0, "Cannot add manifest fragment " + directory + file + ": ");
             }
             return UNKNOWN_ERROR;
         }
@@ -431,24 +428,24 @@ static void appendLine(std::string* error, const std::string& message) {
     }
 }
 
-status_t VintfObject::getOneMatrix(const std::string& path, Named<CompatibilityMatrix>* out,
+status_t VintfObject::getOneMatrix(const std::string& path, CompatibilityMatrix* out,
                                    std::string* error) {
     std::string content;
     status_t status = getFileSystem()->fetch(path, &content, error);
     if (status != OK) {
         return status;
     }
-    if (!gCompatibilityMatrixConverter(&out->object, content, error)) {
+    if (!gCompatibilityMatrixConverter(out, content, error)) {
         if (error) {
             error->insert(0, "Cannot parse " + path + ": ");
         }
         return BAD_VALUE;
     }
-    out->name = path;
+    out->setFileName(path);
     return OK;
 }
 
-status_t VintfObject::getAllFrameworkMatrixLevels(std::vector<Named<CompatibilityMatrix>>* results,
+status_t VintfObject::getAllFrameworkMatrixLevels(std::vector<CompatibilityMatrix>* results,
                                                   std::string* error) {
     std::vector<std::string> dirs = {
         kSystemVintfDir,
@@ -466,7 +463,7 @@ status_t VintfObject::getAllFrameworkMatrixLevels(std::vector<Named<Compatibilit
         }
         for (const std::string& fileName : fileNames) {
             std::string path = dir + fileName;
-            Named<CompatibilityMatrix> namedMatrix;
+            CompatibilityMatrix namedMatrix;
             std::string matrixError;
             status_t matrixStatus = getOneMatrix(path, &namedMatrix, &matrixError);
             if (matrixStatus != OK) {
@@ -499,17 +496,14 @@ status_t VintfObject::getAllFrameworkMatrixLevels(std::vector<Named<Compatibilit
     return OK;
 }
 
-std::shared_ptr<const RuntimeInfo> VintfObject::GetRuntimeInfo(bool skipCache,
-                                                               RuntimeInfo::FetchFlags flags) {
-    return GetInstance()->getRuntimeInfo(skipCache, flags);
+std::shared_ptr<const RuntimeInfo> VintfObject::GetRuntimeInfo(RuntimeInfo::FetchFlags flags) {
+    return GetInstance()->getRuntimeInfo(flags);
 }
-std::shared_ptr<const RuntimeInfo> VintfObject::getRuntimeInfo(bool skipCache,
-                                                               RuntimeInfo::FetchFlags flags) {
+std::shared_ptr<const RuntimeInfo> VintfObject::getRuntimeInfo(RuntimeInfo::FetchFlags flags) {
     std::unique_lock<std::mutex> _lock(mDeviceRuntimeInfo.mutex);
 
-    if (!skipCache) {
-        flags &= (~mDeviceRuntimeInfo.fetchedFlags);
-    }
+    // Skip fetching information that has already been fetched previously.
+    flags &= (~mDeviceRuntimeInfo.fetchedFlags);
 
     if (mDeviceRuntimeInfo.object == nullptr) {
         mDeviceRuntimeInfo.object = getRuntimeInfoFactory()->make_shared();
@@ -824,7 +818,7 @@ android::base::Result<void> VintfObject::IsFqInstanceDeprecated(
 int32_t VintfObject::checkDeprecation(const ListInstances& listInstances,
                                       const std::vector<HidlInterfaceMetadata>& hidlMetadata,
                                       std::string* error) {
-    std::vector<Named<CompatibilityMatrix>> matrixFragments;
+    std::vector<CompatibilityMatrix> matrixFragments;
     auto matrixFragmentsStatus = getAllFrameworkMatrixLevels(&matrixFragments, error);
     if (matrixFragmentsStatus != OK) {
         return matrixFragmentsStatus;
@@ -848,8 +842,8 @@ int32_t VintfObject::checkDeprecation(const ListInstances& listInstances,
 
     const CompatibilityMatrix* targetMatrix = nullptr;
     for (const auto& namedMatrix : matrixFragments) {
-        if (namedMatrix.object.level() == deviceLevel) {
-            targetMatrix = &namedMatrix.object;
+        if (namedMatrix.level() == deviceLevel) {
+            targetMatrix = &namedMatrix;
         }
     }
     if (targetMatrix == nullptr) {
@@ -869,11 +863,10 @@ int32_t VintfObject::checkDeprecation(const ListInstances& listInstances,
     // Matrices with unspecified level are considered "current".
     bool isDeprecated = false;
     for (const auto& namedMatrix : matrixFragments) {
-        if (namedMatrix.object.level() == Level::UNSPECIFIED) continue;
-        if (namedMatrix.object.level() >= deviceLevel) continue;
+        if (namedMatrix.level() == Level::UNSPECIFIED) continue;
+        if (namedMatrix.level() >= deviceLevel) continue;
 
-        const auto& oldMatrix = namedMatrix.object;
-        for (const MatrixHal& hal : oldMatrix.getHals()) {
+        for (const MatrixHal& hal : namedMatrix.getHals()) {
             if (IsHalDeprecated(hal, *targetMatrix, listInstances, childrenMap, error)) {
                 isDeprecated = true;
             }
@@ -929,7 +922,7 @@ const std::unique_ptr<ObjectFactory<RuntimeInfo>>& VintfObject::getRuntimeInfoFa
 }
 
 android::base::Result<bool> VintfObject::hasFrameworkCompatibilityMatrixExtensions() {
-    std::vector<Named<CompatibilityMatrix>> matrixFragments;
+    std::vector<CompatibilityMatrix> matrixFragments;
     std::string error;
     status_t status = getAllFrameworkMatrixLevels(&matrixFragments, &error);
     if (status != OK) {
@@ -938,17 +931,16 @@ android::base::Result<bool> VintfObject::hasFrameworkCompatibilityMatrixExtensio
     }
     for (const auto& namedMatrix : matrixFragments) {
         // Returns true if product matrix exists.
-        if (android::base::StartsWith(namedMatrix.name, kProductVintfDir)) {
+        if (android::base::StartsWith(namedMatrix.fileName(), kProductVintfDir)) {
             return true;
         }
         // Returns true if system_ext matrix exists.
-        if (android::base::StartsWith(namedMatrix.name, kSystemExtVintfDir)) {
+        if (android::base::StartsWith(namedMatrix.fileName(), kSystemExtVintfDir)) {
             return true;
         }
         // Returns true if device system matrix exists.
-        if (android::base::StartsWith(namedMatrix.name, kSystemVintfDir) &&
-            namedMatrix.object.level() == Level::UNSPECIFIED &&
-            !namedMatrix.object.getHals().empty()) {
+        if (android::base::StartsWith(namedMatrix.fileName(), kSystemVintfDir) &&
+            namedMatrix.level() == Level::UNSPECIFIED && !namedMatrix.getHals().empty()) {
             return true;
         }
     }
