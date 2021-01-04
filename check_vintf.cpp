@@ -18,10 +18,13 @@
 #include <sysexits.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <optional>
 
+#include <aidl/metadata.h>
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
@@ -29,8 +32,11 @@
 #include <android-base/strings.h>
 #include <hidl/metadata.h>
 #include <utils/Errors.h>
+#include <vintf/Dirmap.h>
+#include <vintf/HostFileSystem.h>
 #include <vintf/KernelConfigParser.h>
 #include <vintf/VintfObject.h>
+#include <vintf/fcm_exclude.h>
 #include <vintf/parse_string.h>
 #include <vintf/parse_xml.h>
 #include "utils.h"
@@ -41,8 +47,6 @@ namespace details {
 
 // fake sysprops
 using Properties = std::map<std::string, std::string>;
-
-using Dirmap = std::map<std::string, std::string>;
 
 enum Option : int {
     // Modes
@@ -59,56 +63,6 @@ enum Option : int {
 };
 // command line arguments
 using Args = std::multimap<Option, std::string>;
-
-class HostFileSystem : public details::FileSystemImpl {
-   public:
-    HostFileSystem(const Dirmap& dirmap, status_t missingError)
-        : mDirMap(dirmap), mMissingError(missingError) {}
-    status_t fetch(const std::string& path, std::string* fetched,
-                   std::string* error) const override {
-        auto resolved = resolve(path, error);
-        if (resolved.empty()) {
-            return mMissingError;
-        }
-        status_t status = details::FileSystemImpl::fetch(resolved, fetched, error);
-        LOG(INFO) << "Fetch '" << resolved << "': " << toString(status);
-        return status;
-    }
-    status_t listFiles(const std::string& path, std::vector<std::string>* out,
-                       std::string* error) const override {
-        auto resolved = resolve(path, error);
-        if (resolved.empty()) {
-            return mMissingError;
-        }
-        status_t status = details::FileSystemImpl::listFiles(resolved, out, error);
-        LOG(INFO) << "List '" << resolved << "': " << toString(status);
-        return status;
-    }
-
-   private:
-    static std::string toString(status_t status) {
-        return status == OK ? "SUCCESS" : strerror(-status);
-    }
-    std::string resolve(const std::string& path, std::string* error) const {
-        for (auto [prefix, mappedPath] : mDirMap) {
-            if (path == prefix) {
-                return mappedPath;
-            }
-            if (android::base::StartsWith(path, prefix + "/")) {
-                return mappedPath + "/" + path.substr(prefix.size() + 1);
-            }
-        }
-        if (error) {
-            *error = "Cannot resolve path " + path;
-        } else {
-            LOG(mMissingError == NAME_NOT_FOUND ? INFO : ERROR) << "Cannot resolve path " << path;
-        }
-        return "";
-    }
-
-    Dirmap mDirMap;
-    status_t mMissingError;
-};
 
 class PresetPropertyFetcher : public PropertyFetcher {
    public:
@@ -266,24 +220,8 @@ Args parseArgs(int argc, char** argv) {
 }
 
 template <typename T>
-std::map<std::string, std::string> splitArgs(const T& args, char split) {
-    std::map<std::string, std::string> ret;
-    for (const auto& arg : args) {
-        auto pos = arg.find(split);
-        auto key = arg.substr(0, pos);
-        auto value = pos == std::string::npos ? std::string{} : arg.substr(pos + 1);
-        ret[key] = value;
-    }
-    return ret;
-}
-template <typename T>
 Properties getProperties(const T& args) {
     return splitArgs(args, '=');
-}
-
-template <typename T>
-Dirmap getDirmap(const T& args) {
-    return splitArgs(args, ':');
 }
 
 template <typename T>
@@ -349,6 +287,51 @@ int usage(const char* me) {
     return EX_USAGE;
 }
 
+class CheckVintfUtils {
+   public:
+    // Print HALs in the device manifest that are not declared in FCMs <= target FCM version.
+    static void logHalsFromNewFcms(VintfObject* vintfObject,
+                                   const std::vector<HidlInterfaceMetadata>& hidlMetadata) {
+        auto deviceManifest = vintfObject->getDeviceHalManifest();
+        if (deviceManifest == nullptr) {
+            LOG(WARNING) << "Unable to print HALs from new FCMs: no device HAL manifest.";
+            return;
+        }
+        std::vector<CompatibilityMatrix> matrixFragments;
+        std::string error;
+        auto status = vintfObject->getAllFrameworkMatrixLevels(&matrixFragments, &error);
+        if (status != OK || matrixFragments.empty()) {
+            LOG(WARNING) << "Unable to print HALs from new FCMs: " << statusToString(status) << ": "
+                         << error;
+            return;
+        }
+        auto it = std::remove_if(matrixFragments.begin(), matrixFragments.end(),
+                                 [&](const CompatibilityMatrix& matrix) {
+                                     return matrix.level() != Level::UNSPECIFIED &&
+                                            matrix.level() > deviceManifest->level();
+                                 });
+        matrixFragments.erase(it, matrixFragments.end());
+        auto combined =
+            CompatibilityMatrix::combine(deviceManifest->level(), &matrixFragments, &error);
+        if (combined == nullptr) {
+            LOG(WARNING) << "Unable to print HALs from new FCMs: unable to combine matrix "
+                            "fragments <= level "
+                         << deviceManifest->level() << ": " << error;
+        }
+        auto unused = deviceManifest->checkUnusedHals(*combined, hidlMetadata);
+        if (unused.empty()) {
+            LOG(INFO) << "All HALs in device manifest are declared in FCM <= level "
+                      << deviceManifest->level();
+            return;
+        }
+        LOG(INFO) << "The following HALs in device manifest are not declared in FCM <= level "
+                  << deviceManifest->level() << ": ";
+        for (const auto& hal : unused) {
+            LOG(INFO) << "  " << hal;
+        }
+    }
+};
+
 // If |result| is already an error, don't do anything. Otherwise, set it to
 // an error with |errorCode|. Return reference to Error object for appending
 // additional error messages.
@@ -367,11 +350,16 @@ android::base::Error& SetErrorCode(std::optional<android::base::Error>* retError
 
 // If |other| is an error, add it to |retError|.
 template <typename T>
-void AddResult(std::optional<android::base::Error>* retError,
-               const android::base::Result<T>& other) {
+void AddResult(std::optional<android::base::Error>* retError, const android::base::Result<T>& other,
+               const char* additionalMessage = "") {
     if (other.ok()) return;
-    SetErrorCode(retError, other.error().code()) << other.error();
+    SetErrorCode(retError, other.error().code()) << other.error() << additionalMessage;
 }
+
+static constexpr const char* gCheckMissingHalsSuggestion{
+    "\n- If this is a new package, add it to the latest framework compatibility matrix."
+    "\n- If no interface should be added to the framework compatibility matrix (e.g. "
+    "types-only package), add it to the exempt list in libvintf_fcm_exclude."};
 
 android::base::Result<void> checkAllFiles(const Dirmap& dirmap, const Properties& props,
                                           std::shared_ptr<StaticRuntimeInfo> runtimeInfo) {
@@ -425,6 +413,8 @@ android::base::Result<void> checkAllFiles(const Dirmap& dirmap, const Properties
         LOG(INFO) << "Skip checking unused HALs.";
     }
 
+    CheckVintfUtils::logHalsFromNewFcms(vintfObject.get(), hidlMetadata);
+
     if (retError.has_value()) {
         return *retError;
     } else {
@@ -455,6 +445,13 @@ int checkDirmaps(const Dirmap& dirmap, const Properties& props) {
             auto matrix = vintfObject->getFrameworkCompatibilityMatrix();
             if (!matrix) {
                 LOG(ERROR) << "Cannot fetch system matrix.";
+                exitCode = EX_SOFTWARE;
+            }
+            auto res = vintfObject->checkMissingHalsInMatrices(HidlInterfaceMetadata::all(),
+                                                               AidlInterfaceMetadata::all(),
+                                                               ShouldCheckMissingHalsInFcm);
+            if (!res.ok()) {
+                LOG(ERROR) << res.error() << gCheckMissingHalsSuggestion;
                 exitCode = EX_SOFTWARE;
             }
             continue;

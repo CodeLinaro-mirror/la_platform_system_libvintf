@@ -24,6 +24,7 @@
 #include <tuple>
 #include <vector>
 
+#include <aidl/metadata.h>
 #include <android-base/result.h>
 #include <hidl/metadata.h>
 
@@ -40,6 +41,8 @@ namespace android {
 namespace vintf {
 
 namespace details {
+class CheckVintfUtils;
+class FmOnlyVintfObject;
 class VintfObjectAfterUpdate;
 
 template <typename T>
@@ -221,6 +224,15 @@ class VintfObject {
     android::base::Result<void> checkUnusedHals(
         const std::vector<HidlInterfaceMetadata>& hidlMetadata);
 
+    // Check that all HALs are added to the any framework compatibility matrix.
+    // If shouldCheck is set, only check if:
+    // - For HIDL, shouldCheck(packageAndVersion) (e.g. android.hardware.foo@1.0)
+    // - For AIDL and native, shouldCheck(package) (e.g. android.hardware.foo)
+    android::base::Result<void> checkMissingHalsInMatrices(
+        const std::vector<HidlInterfaceMetadata>& hidlMetadata,
+        const std::vector<AidlInterfaceMetadata>& aidlMetadata,
+        std::function<bool(const std::string&)> shouldCheck = {});
+
    private:
     std::unique_ptr<FileSystem> mFileSystem;
     std::unique_ptr<ObjectFactory<RuntimeInfo>> mRuntimeInfoFactory;
@@ -245,6 +257,8 @@ class VintfObject {
 
     // Expose functions to simulate dependency injection.
     friend class details::VintfObjectAfterUpdate;
+    friend class details::CheckVintfUtils;
+    friend class details::FmOnlyVintfObject;
 
    protected:
     virtual const std::unique_ptr<FileSystem>& getFileSystem();
@@ -316,6 +330,9 @@ class VintfObject {
                                  std::string* error = nullptr);
     status_t fetchVendorHalManifest(HalManifest* out, std::string* error = nullptr);
     status_t fetchFrameworkHalManifest(HalManifest* out, std::string* error = nullptr);
+
+    status_t fetchUnfilteredFrameworkHalManifest(HalManifest* out, std::string* error);
+    void filterHalsByDeviceManifestLevel(HalManifest* out);
 
     using ChildrenMap = std::multimap<std::string, std::string>;
     static bool IsHalDeprecated(const MatrixHal& oldMatrixHal,

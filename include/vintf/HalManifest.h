@@ -52,6 +52,10 @@ namespace details {
 using InstancesOfVersion =
     std::map<std::string /* interface */, std::set<std::string /* instance */>>;
 using Instances = std::map<Version, InstancesOfVersion>;
+
+class CheckVintfUtils;
+class FmOnlyVintfObject;
+
 }  // namespace details
 
 // A HalManifest is reported by the hardware and query-able from
@@ -86,7 +90,7 @@ struct HalManifest : public HalGroup<ManifestHal>,
                             CheckFlags::Type flags = CheckFlags::DEFAULT) const;
 
     // Generate a compatibility matrix such that checkCompatibility will return true.
-    CompatibilityMatrix generateCompatibleMatrix() const;
+    CompatibilityMatrix generateCompatibleMatrix(bool optional = true) const;
 
     // Returns all component names.
     std::set<std::string> getHalNames() const;
@@ -158,7 +162,9 @@ struct HalManifest : public HalGroup<ManifestHal>,
     friend struct HalManifestConverter;
     friend class VintfObject;
     friend class AssembleVintfImpl;
+    friend class details::CheckVintfUtils;
     friend struct LibVintfTest;
+    friend class details::FmOnlyVintfObject;
     friend std::string dump(const HalManifest &vm);
     friend bool operator==(const HalManifest &lft, const HalManifest &rgt);
 
@@ -210,6 +216,10 @@ struct HalManifest : public HalGroup<ManifestHal>,
     // Whether the manifest contains information about the kernel for compatibility checks.
     // True if kernel()->checkCompatibility can be called.
     bool shouldCheckKernelCompatibility() const;
+
+    // Helper for shouldAdd(). Check if |hal| has a conflicting major version with this. Return
+    // false if hal should not be added, and set |error| accordingly. Return true if check passes.
+    bool addingConflictingMajorVersion(const ManifestHal& hal, std::string* error) const;
 
     SchemaType mType;
     Level mLevel = Level::UNSPECIFIED;
