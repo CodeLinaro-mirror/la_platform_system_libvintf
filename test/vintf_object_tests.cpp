@@ -31,6 +31,7 @@
 #include <vintf/parse_string.h>
 #include <vintf/parse_xml.h>
 #include "constants-private.h"
+#include "parse_xml_internal.h"
 #include "test_constants.h"
 #include "utils-fake.h"
 
@@ -48,9 +49,6 @@ static AssertionResult In(const std::string& sub, const std::string& str) {
 
 namespace android {
 namespace vintf {
-
-extern XmlConverter<KernelInfo>& gKernelInfoConverter;
-
 namespace testing {
 
 using namespace ::android::vintf::details;
@@ -237,6 +235,43 @@ const std::string systemMatrixLevel2 =
     "    </hal>\n"
     "    <hal format=\"hidl\" optional=\"true\">\n"
     "        <name>android.hardware.minor</name>\n"
+    "        <version>1.1</version>\n"
+    "        <interface>\n"
+    "            <name>IMinor</name>\n"
+    "            <instance>default</instance>\n"
+    "        </interface>\n"
+    "    </hal>\n"
+    "</compatibility-matrix>\n";
+
+//
+// Smaller product FCMs at different levels to test that framework and product
+// FCMs are combined when checking deprecation.
+//
+
+const std::string productMatrixLevel1 =
+    "<compatibility-matrix " + kMetaVersionStr + " type=\"framework\" level=\"1\">\n"
+    "    <hal format=\"hidl\" optional=\"true\">\n"
+    "        <name>product.removed</name>\n"
+    "        <version>1.0</version>\n"
+    "        <interface>\n"
+    "            <name>IRemoved</name>\n"
+    "            <instance>default</instance>\n"
+    "        </interface>\n"
+    "    </hal>\n"
+    "    <hal format=\"hidl\" optional=\"true\">\n"
+    "        <name>product.minor</name>\n"
+    "        <version>1.0</version>\n"
+    "        <interface>\n"
+    "            <name>IMinor</name>\n"
+    "            <instance>default</instance>\n"
+    "        </interface>\n"
+    "    </hal>\n"
+    "</compatibility-matrix>\n";
+
+const std::string productMatrixLevel2 =
+    "<compatibility-matrix " + kMetaVersionStr + " type=\"framework\" level=\"2\">\n"
+    "    <hal format=\"hidl\" optional=\"true\">\n"
+    "        <name>product.minor</name>\n"
     "        <version>1.1</version>\n"
     "        <interface>\n"
     "            <name>IMinor</name>\n"
@@ -678,7 +713,7 @@ TEST_F(VintfObjectTest, ProductCompatibilityMatrix) {
         return !found;  // continue if not found
     });
     EXPECT_TRUE(found) << "android.hardware.foo@1.0::IFoo/default should be found in matrix:\n"
-                       << gCompatibilityMatrixConverter(*fcm);
+                       << toXml(*fcm);
 }
 
 const std::string vendorEtcManifest =
@@ -917,6 +952,18 @@ class DeprecateTest : public VintfObjectTestBase {
             }));
         expectFetchRepeatedly(kSystemVintfDir + "compatibility_matrix.1.xml"s, systemMatrixLevel1);
         expectFetchRepeatedly(kSystemVintfDir + "compatibility_matrix.2.xml"s, systemMatrixLevel2);
+        EXPECT_CALL(fetcher(), listFiles(StrEq(kProductVintfDir), _, _))
+            .WillRepeatedly(Invoke([](const auto&, auto* out, auto*) {
+                *out = {
+                    "compatibility_matrix.1.xml",
+                    "compatibility_matrix.2.xml",
+                };
+                return ::android::OK;
+            }));
+        expectFetchRepeatedly(kProductVintfDir + "compatibility_matrix.1.xml"s,
+                              productMatrixLevel1);
+        expectFetchRepeatedly(kProductVintfDir + "compatibility_matrix.2.xml"s,
+                              productMatrixLevel2);
         expectFileNotExist(StrEq(kProductMatrix));
         expectNeverFetch(kSystemLegacyMatrix);
 
@@ -935,12 +982,13 @@ TEST_F(DeprecateTest, CheckNoDeprecate) {
     auto pred = getInstanceListFunc({
         "android.hardware.minor@1.1::IMinor/default",
         "android.hardware.major@2.0::IMajor/default",
+        "product.minor@1.1::IMinor/default",
     });
     std::string error;
     EXPECT_EQ(NO_DEPRECATED_HALS, vintfObject->checkDeprecation(pred, {}, &error)) << error;
 }
 
-TEST_F(DeprecateTest, CheckRemoved) {
+TEST_F(DeprecateTest, CheckRemovedSystem) {
     auto pred = getInstanceListFunc({
         "android.hardware.removed@1.0::IRemoved/default",
         "android.hardware.minor@1.1::IMinor/default",
@@ -951,10 +999,29 @@ TEST_F(DeprecateTest, CheckRemoved) {
         << "removed@1.0 should be deprecated. " << error;
 }
 
-TEST_F(DeprecateTest, CheckMinor) {
+TEST_F(DeprecateTest, CheckRemovedProduct) {
+    auto pred = getInstanceListFunc({
+        "product.removed@1.0::IRemoved/default",
+        "product.minor@1.1::IMinor/default",
+    });
+    std::string error;
+    EXPECT_EQ(DEPRECATED, vintfObject->checkDeprecation(pred, {}, &error))
+        << "removed@1.0 should be deprecated. " << error;
+}
+
+TEST_F(DeprecateTest, CheckMinorSystem) {
     auto pred = getInstanceListFunc({
         "android.hardware.minor@1.0::IMinor/default",
         "android.hardware.major@2.0::IMajor/default",
+    });
+    std::string error;
+    EXPECT_EQ(DEPRECATED, vintfObject->checkDeprecation(pred, {}, &error))
+        << "minor@1.0 should be deprecated. " << error;
+}
+
+TEST_F(DeprecateTest, CheckMinorProduct) {
+    auto pred = getInstanceListFunc({
+        "product.minor@1.0::IMinor/default",
     });
     std::string error;
     EXPECT_EQ(DEPRECATED, vintfObject->checkDeprecation(pred, {}, &error))
@@ -1081,7 +1148,7 @@ TEST_F(RegexTest, CombineLevel1) {
     expectTargetFcmVersion(1);
     auto matrix = vintfObject->getFrameworkCompatibilityMatrix();
     ASSERT_NE(nullptr, matrix);
-    std::string xml = gCompatibilityMatrixConverter(*matrix);
+    std::string xml = toXml(*matrix);
 
     EXPECT_IN(
         "    <hal format=\"hidl\" optional=\"false\">\n"
@@ -1136,7 +1203,7 @@ TEST_F(RegexTest, CombineLevel2) {
     expectTargetFcmVersion(2);
     auto matrix = vintfObject->getFrameworkCompatibilityMatrix();
     ASSERT_NE(nullptr, matrix);
-    std::string xml = gCompatibilityMatrixConverter(*matrix);
+    std::string xml = toXml(*matrix);
 
     EXPECT_IN(
         "    <hal format=\"hidl\" optional=\"false\">\n"
@@ -1303,7 +1370,7 @@ TEST_F(KernelTest, Level1AndLevel2) {
     expectTargetFcmVersion(1);
     auto matrix = vintfObject->getFrameworkCompatibilityMatrix();
     ASSERT_NE(nullptr, matrix);
-    std::string xml = gCompatibilityMatrixConverter(*matrix);
+    std::string xml = toXml(*matrix);
 
     EXPECT_IN(FAKE_KERNEL("1.0.0", "A1", 1), xml) << "\nOld requirements must not change.";
     EXPECT_IN(FAKE_KERNEL("2.0.0", "B1", 1), xml) << "\nOld requirements must not change.";
@@ -1321,7 +1388,7 @@ TEST_F(KernelTest, Level1AndMore) {
     expectTargetFcmVersion(1);
     auto matrix = vintfObject->getFrameworkCompatibilityMatrix();
     ASSERT_NE(nullptr, matrix);
-    std::string xml = gCompatibilityMatrixConverter(*matrix);
+    std::string xml = toXml(*matrix);
 
     EXPECT_IN(FAKE_KERNEL("1.0.0", "A1", 1), xml) << "\nOld requirements must not change.";
     EXPECT_IN(FAKE_KERNEL("2.0.0", "B1", 1), xml) << "\nOld requirements must not change.";
@@ -1335,7 +1402,7 @@ TEST_F(KernelTest, Level1AndMore) {
 
 KernelInfo MakeKernelInfo(const std::string& version, const std::string& key) {
     KernelInfo info;
-    CHECK(gKernelInfoConverter(&info,
+    CHECK(fromXml(&info,
                                "    <kernel version=\"" + version + "\">\n"
                                "        <config>\n"
                                "            <key>CONFIG_" + key + "</key>\n"
