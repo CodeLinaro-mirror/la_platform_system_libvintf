@@ -2553,6 +2553,51 @@ TEST_F(LibVintfTest, AddRequiredHalOverlapInstanceSplit) {
         "</compatibility-matrix>\n",
         xml);
 }
+
+TEST_F(LibVintfTest, AddOptionalHalUpdatableViaApex) {
+    CompatibilityMatrix cm1;
+    CompatibilityMatrix cm2;
+    std::string error;
+    std::string xml;
+
+    xml =
+        "<compatibility-matrix " + kMetaVersionStr + " type=\"framework\" level=\"1\">\n"
+        "    <hal format=\"aidl\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <interface>\n"
+        "            <name>IFoo</name>\n"
+        "            <instance>default</instance>\n"
+        "        </interface>\n"
+        "    </hal>\n"
+        "</compatibility-matrix>\n";
+    EXPECT_TRUE(fromXml(&cm1, xml, &error)) << error;
+
+    xml =
+        "<compatibility-matrix " + kMetaVersionStr + " type=\"framework\" level=\"2\">\n"
+        "    <hal format=\"aidl\" updatable-via-apex=\"true\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <interface>\n"
+        "            <name>IFoo</name>\n"
+        "            <instance>default</instance>\n"
+        "        </interface>\n"
+        "    </hal>\n"
+        "</compatibility-matrix>\n";
+    EXPECT_TRUE(fromXml(&cm2, xml, &error)) << error;
+
+    EXPECT_TRUE(addAllHalsAsOptional(&cm1, &cm2, &error)) << error;
+    xml = toXml(cm1, SerializeFlags::HALS_ONLY);
+    EXPECT_EQ(xml,
+              "<compatibility-matrix " + kMetaVersionStr + " type=\"framework\" level=\"1\">\n"
+              "    <hal format=\"aidl\" optional=\"false\" updatable-via-apex=\"true\">\n"
+              "        <name>android.hardware.foo</name>\n"
+              "        <interface>\n"
+              "            <name>IFoo</name>\n"
+              "            <instance>default</instance>\n"
+              "        </interface>\n"
+              "    </hal>\n"
+              "</compatibility-matrix>\n");
+}
+
 TEST_F(LibVintfTest, AddOptionalXmlFile) {
     CompatibilityMatrix cm1;
     CompatibilityMatrix cm2;
@@ -3109,6 +3154,85 @@ TEST_F(LibVintfTest, ParsingUpdatableHals) {
     auto foo = getHals(manifest, "android.hardware.foo");
     ASSERT_EQ(1u, foo.size());
     EXPECT_THAT(foo.front()->updatableViaApex(), Optional(Eq("com.android.foo")));
+}
+
+TEST_F(LibVintfTest, ParsingUpdatableViaApex_EmptyIsValidForNonUpdatableHal) {
+    std::string error;
+
+    HalManifest manifest;
+    manifest.setFileName("/apex/com.foo/etc/vintf/manifest.xml");
+    std::string manifestXml =
+        "<manifest " + kMetaVersionStr + " type=\"device\">\n"
+        "    <hal format=\"aidl\" updatable-via-apex=\"\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <fqname>IFoo/default</fqname>\n"
+        "    </hal>\n"
+        "</manifest>\n";
+    EXPECT_TRUE(fromXml(&manifest, manifestXml, &error)) << error;
+    EXPECT_EQ(manifestXml, toXml(manifest, SerializeFlags::HALS_ONLY));
+
+    // check by calling the API: updatableViaApex()
+    auto foo = getHals(manifest, "android.hardware.foo");
+    ASSERT_EQ(1u, foo.size());
+    EXPECT_THAT(foo.front()->updatableViaApex(), Optional(Eq("")));
+}
+
+TEST_F(LibVintfTest, ParsingUpdatableViaApex_UpdatableHalCanExplicitlySet) {
+    std::string error;
+
+    HalManifest manifest;
+    manifest.setFileName("/apex/com.foo/etc/vintf/manifest.xml");
+    std::string manifestXml =
+        "<manifest " + kMetaVersionStr + " type=\"device\">\n"
+        "    <hal format=\"aidl\" updatable-via-apex=\"com.foo\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <fqname>IFoo/default</fqname>\n"
+        "    </hal>\n"
+        "</manifest>\n";
+    EXPECT_TRUE(fromXml(&manifest, manifestXml, &error)) << error;
+    EXPECT_EQ(manifestXml, toXml(manifest, SerializeFlags::HALS_ONLY));
+
+    // check by calling the API: updatableViaApex()
+    auto foo = getHals(manifest, "android.hardware.foo");
+    ASSERT_EQ(1u, foo.size());
+    EXPECT_THAT(foo.front()->updatableViaApex(), Optional(Eq("com.foo")));
+}
+
+TEST_F(LibVintfTest, ParsingUpdatableViaApex_ErrorIfExplicitValueMismatch) {
+    std::string error;
+
+    HalManifest manifest;
+    manifest.setFileName("/apex/com.bar/etc/vintf/manifest.xml");
+    std::string manifestXml =
+        "<manifest " + kMetaVersionStr + " type=\"device\">\n"
+        "    <hal format=\"aidl\" updatable-via-apex=\"com.foo\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <fqname>IFoo/default</fqname>\n"
+        "    </hal>\n"
+        "</manifest>\n";
+    EXPECT_FALSE(fromXml(&manifest, manifestXml, &error));
+    EXPECT_IN("updatable-via-apex com.foo doesn't match", error);
+}
+
+TEST_F(LibVintfTest, ParsingUpdatableViaApex_SetToCurrentApex) {
+    std::string error;
+
+    HalManifest manifest;
+    manifest.setFileName("/apex/com.foo/etc/vintf/manifest.xml");
+    std::string manifestXml =
+        "<manifest " + kMetaVersionStr + " type=\"device\">\n"
+        "    <hal format=\"aidl\">\n"
+        "        <name>android.hardware.foo</name>\n"
+        "        <fqname>IFoo/default</fqname>\n"
+        "    </hal>\n"
+        "</manifest>\n";
+    EXPECT_TRUE(fromXml(&manifest, manifestXml, &error));
+    EXPECT_IN("updatable-via-apex=\"com.foo\"", toXml(manifest, SerializeFlags::HALS_ONLY));
+
+    // check by calling the API: updatableViaApex()
+    auto foo = getHals(manifest, "android.hardware.foo");
+    ASSERT_EQ(1u, foo.size());
+    EXPECT_THAT(foo.front()->updatableViaApex(), Optional(Eq("com.foo")));
 }
 
 TEST_F(LibVintfTest, ParsingUpdatableHalsWithInterface) {
