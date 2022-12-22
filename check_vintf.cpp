@@ -63,6 +63,7 @@ enum Option : int {
     PROPERTY,
     DIR_MAP,
     KERNEL,
+    APEX_INFO_FILE,
 };
 // command line arguments
 using Args = std::multimap<Option, std::string>;
@@ -134,6 +135,8 @@ struct StaticRuntimeInfo : public RuntimeInfo {
         }
         return OK;
     }
+
+    void setIsMainline(bool value) { mIsMainline = value; }
 };
 
 struct StubRuntimeInfo : public RuntimeInfo {
@@ -187,6 +190,14 @@ int checkCompatibilityForFiles(const std::string& manifestPath, const std::strin
     return 0;
 }
 
+// Create VINTF APEX module.
+//  The input apex_info_file provides the location of the apex-info-file to parse
+// the APEX information.  The android::apex::kApexRoot is used to form the path of
+// the APEXs to allow usual use of FileSystem dirmaps.
+static std::unique_ptr<ApexInterface> createApex(const std::string& apex_info_file) {
+    return std::make_unique<Apex>(apex_info_file);
+}
+
 Args parseArgs(int argc, char** argv) {
     int longOptFlag;
     int optionIndex;
@@ -202,6 +213,7 @@ Args parseArgs(int argc, char** argv) {
         {"property", required_argument, &longOptFlag, PROPERTY},
         {"dirmap", required_argument, &longOptFlag, DIR_MAP},
         {"kernel", required_argument, &longOptFlag, KERNEL},
+        {"apex-info-file", required_argument, &longOptFlag, APEX_INFO_FILE},
         {0, 0, 0, 0}};
     std::map<int, Option> shortopts{
         {'h', HELP}, {'D', PROPERTY}, {'c', CHECK_COMPAT},
@@ -236,6 +248,8 @@ bool parseKernelVersionOrRelease(const std::string& s, StaticRuntimeInfo* ret) {
     // 5.4.42
     if (parse(s, &ret->kernelVersion)) {
         ret->kernelLevel = Level::UNSPECIFIED;
+        ret->setIsMainline(false);
+        LOG(INFO) << "\"" << s << "\" is not a mainline kernel.";
         return true;
     }
     LOG(INFO) << "Cannot parse \"" << s << "\" as kernel version, parsing as GKI kernel release.";
@@ -246,6 +260,8 @@ bool parseKernelVersionOrRelease(const std::string& s, StaticRuntimeInfo* ret) {
         ret->kernelVersion = KernelVersion{kernelRelease->version(), kernelRelease->patch_level(),
                                            kernelRelease->sub_level()};
         ret->kernelLevel = RuntimeInfo::gkiAndroidReleaseToLevel(kernelRelease->android_release());
+        ret->setIsMainline(false);
+        LOG(INFO) << "\"" << s << "\" is not a mainline kernel.";
         return true;
     }
     LOG(INFO) << "Cannot parse \"" << s << "\" as GKI kernel release, parsing as kernel release";
@@ -255,6 +271,11 @@ bool parseKernelVersionOrRelease(const std::string& s, StaticRuntimeInfo* ret) {
     // substr handles pos == npos case
     if (parse(s.substr(0, pos), &ret->kernelVersion)) {
         ret->kernelLevel = Level::UNSPECIFIED;
+
+        bool isMainline = RuntimeInfo::kernelReleaseIsMainline(s);
+        ret->setIsMainline(isMainline);
+        LOG(INFO) << "\"" << s << "\" is" << (isMainline ? "" : " not") << " a mainline kernel.";
+
         return true;
     }
 
@@ -327,6 +348,7 @@ int usage(const char* me) {
         << "                unspecified, kernel requirements are skipped." << std::endl
         << "                The first half, version, can be just x.y.z, or a file " << std::endl
         << "                containing the full kernel release string x.y.z-something." << std::endl
+        << "        --apex-info-file <file>.  Set apex-info-list.xml file." << std::endl
         << "        --help: show this message." << std::endl
         << std::endl
         << "    Example:" << std::endl
@@ -428,7 +450,8 @@ static constexpr const char* gCheckMissingHalsSuggestion{
     "types-only package), add it to the exempt list in libvintf_fcm_exclude."};
 
 android::base::Result<void> checkAllFiles(const Dirmap& dirmap, const Properties& props,
-                                          std::shared_ptr<StaticRuntimeInfo> runtimeInfo) {
+                                          std::shared_ptr<StaticRuntimeInfo> runtimeInfo,
+                                          const std::string& apex_info_file) {
     auto hostPropertyFetcher = std::make_unique<PresetPropertyFetcher>();
     hostPropertyFetcher->setProperties(props);
 
@@ -440,6 +463,7 @@ android::base::Result<void> checkAllFiles(const Dirmap& dirmap, const Properties
             .setFileSystem(std::make_unique<HostFileSystem>(dirmap, UNKNOWN_ERROR))
             .setPropertyFetcher(std::move(hostPropertyFetcher))
             .setRuntimeInfoFactory(std::make_unique<StaticRuntimeInfoFactory>(runtimeInfo))
+            .setApex(createApex(apex_info_file))
             .build();
 
     std::optional<android::base::Error<>> retError = std::nullopt;
@@ -488,7 +512,7 @@ android::base::Result<void> checkAllFiles(const Dirmap& dirmap, const Properties
     }
 }
 
-int checkDirmaps(const Dirmap& dirmap, const Properties& props) {
+int checkDirmaps(const Dirmap& dirmap, const Properties& props, const std::string& apex_info_file) {
     auto hostPropertyFetcher = std::make_unique<PresetPropertyFetcher>();
     hostPropertyFetcher->setProperties(props);
     auto exitCode = EX_OK;
@@ -498,6 +522,7 @@ int checkDirmaps(const Dirmap& dirmap, const Properties& props) {
                 .setFileSystem(std::make_unique<HostFileSystem>(dirmap, NAME_NOT_FOUND))
                 .setPropertyFetcher(std::move(hostPropertyFetcher))
                 .setRuntimeInfoFactory(std::make_unique<StaticRuntimeInfoFactory>(nullptr))
+                .setApex(createApex(apex_info_file))
                 .build();
 
         if (android::base::StartsWith(prefix, "/system")) {
@@ -583,18 +608,29 @@ int main(int argc, char** argv) {
         return usage(argv[0]);
     }
 
+    auto dirmap = getDirmap(iterateValues(args, DIR_MAP));
+    auto properties = getProperties(iterateValues(args, PROPERTY));
     if (!iterateValues(args, DUMP_FILE_LIST).empty()) {
-        for (const auto& file : dumpFileList()) {
+        auto it = properties.find("ro.boot.product.hardware.sku");
+        const std::string sku = it == properties.end() ? "" : it->second;
+        for (const auto& file : dumpFileList(sku)) {
             std::cout << file << std::endl;
         }
         return 0;
     }
 
-    auto dirmap = getDirmap(iterateValues(args, DIR_MAP));
-    auto properties = getProperties(iterateValues(args, PROPERTY));
+    std::string apex_info_file = android::apex::info::kApexInfoFile;
+    auto apexinfofiles = iterateValues(args, APEX_INFO_FILE);
+    if (!apexinfofiles.empty()) {
+        if (std::distance(apexinfofiles.begin(), apexinfofiles.end()) > 1) {
+            LOG(ERROR) << "ERROR: Can't have multiple apex info files";
+            return usage(argv[0]);
+        }
+        apex_info_file = *apexinfofiles.begin();
+    }
 
     if (!iterateValues(args, CHECK_ONE).empty()) {
-        return checkDirmaps(dirmap, properties);
+        return checkDirmaps(dirmap, properties, apex_info_file);
     }
 
     auto checkCompat = iterateValues(args, CHECK_COMPAT);
@@ -625,7 +661,7 @@ int main(int argc, char** argv) {
         return usage(argv[0]);
     }
 
-    auto compat = checkAllFiles(dirmap, properties, runtimeInfo);
+    auto compat = checkAllFiles(dirmap, properties, runtimeInfo, apex_info_file);
 
     if (compat.ok()) {
         std::cout << "COMPATIBLE" << std::endl;
