@@ -39,7 +39,9 @@ using namespace ::testing;
 using namespace std::literals;
 
 using android::base::testing::HasError;
+using android::base::testing::HasValue;
 using android::base::testing::Ok;
+using android::base::testing::WithCode;
 using android::base::testing::WithMessage;
 using android::vintf::FqInstance;
 
@@ -532,8 +534,11 @@ class VintfObjectTestBase : public ::testing::Test {
         // Map the apex with manifest to the files below
         const std::string& active_apex = apex_dirs.at(0);
 
-        EXPECT_CALL(apex(), DeviceVintfDirs())
-            .WillOnce(Return(apex_dirs))
+        EXPECT_CALL(apex(), DeviceVintfDirs(_, _, _))
+            .WillOnce(Invoke([apex_dirs](auto*, auto* out, auto*){
+                *out = apex_dirs;
+                return ::android::OK;
+            }))
             ;
 
         EXPECT_CALL(fetcher(), listFiles(_, _, _))
@@ -550,6 +555,9 @@ class VintfObjectTestBase : public ::testing::Test {
 
         // Expect to fetch APEX directory manifest once.
         expectFetch(std::string(active_apex).append("manifest.xml"), manifest);
+
+        ON_CALL(propertyFetcher(), getBoolProperty("apex.all.ready", _))
+            .WillByDefault(Return(true));
     }
 
     std::unique_ptr<VintfObject> vintfObject;
@@ -949,15 +957,24 @@ class DeviceManifestTest : public VintfObjectTestBase {
       // Map the apex with manifest to the files below
       const std::string& active_apex = apex_dirs.at(0);
 
-      EXPECT_CALL(apex(), DeviceVintfDirs())
-          .WillOnce({}) // Initialization
-          .WillOnce(Return(apex_dirs)) // after apex loaded
+      EXPECT_CALL(apex(), DeviceVintfDirs(_, _, _))
+          .WillOnce(Invoke([](auto*, auto* out, auto*){
+            *out = {};
+            return ::android::OK;
+          })) // Initialization
+          .WillOnce(Invoke([apex_dirs](auto*, auto* out, auto*){
+            *out = apex_dirs;
+            return ::android::OK;
+          })) // after apex loaded
           ;
 
-      EXPECT_CALL(apex(),HasUpdate()) // Not called during init
+      EXPECT_CALL(apex(), HasUpdate(_)) // Not called during init
           .WillOnce(Return(true)) // Apex loaded
           .WillOnce(Return(false)) // no updated to apex data
           ;
+
+      ON_CALL(propertyFetcher(), getBoolProperty("apex.all.ready", _))
+          .WillByDefault(Return(true));
 
       EXPECT_CALL(fetcher(), listFiles(_, _, _))
           .WillRepeatedly(Invoke([](const auto&, auto* out, auto*) {
@@ -2727,6 +2744,56 @@ TEST_P(VintfObjectComposerHalTest, Test) {
 INSTANTIATE_TEST_SUITE_P(VintfObjectComposerHalTest, VintfObjectComposerHalTest,
                          ::testing::ValuesIn(VintfObjectComposerHalTest::GetParams()),
                          [](const auto& info) { return to_string(info.param); });
+
+constexpr const char* systemMatrixLatestMinLtsFormat = R"(
+<compatibility-matrix %s type="framework" level="%s">
+    <kernel version="%s" />
+    <kernel version="%s" />
+    <kernel version="%s" />
+</compatibility-matrix>
+)";
+
+class VintfObjectLatestMinLtsTest : public MultiMatrixTest {};
+
+TEST_F(VintfObjectLatestMinLtsTest, TestEmpty) {
+    SetUpMockSystemMatrices({});
+    EXPECT_THAT(vintfObject->getLatestMinLtsAtFcmVersion(Level::S),
+                HasError(WithCode(-NAME_NOT_FOUND)));
+}
+
+TEST_F(VintfObjectLatestMinLtsTest, TestMissing) {
+    SetUpMockSystemMatrices({
+        android::base::StringPrintf(systemMatrixLatestMinLtsFormat, kMetaVersionStr.c_str(),
+                                    to_string(Level::S).c_str(), "4.19.191", "5.4.86", "5.10.43"),
+    });
+    EXPECT_THAT(
+        vintfObject->getLatestMinLtsAtFcmVersion(Level::T),
+        HasError(WithMessage(HasSubstr("Can't find compatibility matrix fragment for level 7"))));
+}
+
+TEST_F(VintfObjectLatestMinLtsTest, TestSimple) {
+    SetUpMockSystemMatrices({
+        android::base::StringPrintf(systemMatrixLatestMinLtsFormat, kMetaVersionStr.c_str(),
+                                    to_string(Level::S).c_str(), "4.19.191", "5.4.86", "5.10.43"),
+        android::base::StringPrintf(systemMatrixLatestMinLtsFormat, kMetaVersionStr.c_str(),
+                                    to_string(Level::T).c_str(), "5.4.86", "5.10.107", "5.15.41"),
+    });
+    EXPECT_THAT(vintfObject->getLatestMinLtsAtFcmVersion(Level::S),
+                HasValue(KernelVersion{5, 10, 43}));
+    EXPECT_THAT(vintfObject->getLatestMinLtsAtFcmVersion(Level::T),
+                HasValue(KernelVersion{5, 15, 41}));
+}
+
+TEST_F(VintfObjectLatestMinLtsTest, TestMultipleFragment) {
+    SetUpMockSystemMatrices({
+        android::base::StringPrintf(systemMatrixLatestMinLtsFormat, kMetaVersionStr.c_str(),
+                                    to_string(Level::S).c_str(), "4.19.191", "5.4.86", "5.10.43"),
+        android::base::StringPrintf(systemMatrixLatestMinLtsFormat, kMetaVersionStr.c_str(),
+                                    to_string(Level::S).c_str(), "5.4.86", "5.10.107", "5.15.41"),
+    });
+    EXPECT_THAT(vintfObject->getLatestMinLtsAtFcmVersion(Level::S),
+                HasValue(KernelVersion{5, 15, 41}));
+}
 
 }  // namespace testing
 }  // namespace vintf
