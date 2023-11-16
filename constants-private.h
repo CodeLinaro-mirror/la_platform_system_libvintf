@@ -54,6 +54,7 @@ constexpr const char* kProductManifest = PRODUCT_VINTF_DIR "manifest.xml";
 constexpr const char* kSystemExtManifest = SYSTEM_EXT_VINTF_DIR "manifest.xml";
 
 constexpr const char* kVendorManifestFragmentDir = VENDOR_VINTF_DIR "manifest/";
+constexpr const char* kQspaManifestFragmentDir = VENDOR_VINTF_DIR "manifest/qspa/";
 constexpr const char* kSystemManifestFragmentDir = SYSTEM_VINTF_DIR "manifest/";
 constexpr const char* kOdmManifestFragmentDir = ODM_VINTF_DIR "manifest/";
 constexpr const char* kProductManifestFragmentDir = PRODUCT_VINTF_DIR "manifest/";
