@@ -406,12 +406,10 @@ class AssembleVintfImpl : public AssembleVintf {
 
                 auto it = std::max_element(metadata.versions.begin(), metadata.versions.end());
                 if (it == metadata.versions.end()) {
-                    // TODO(292151564) There are a few known HALs that aren't
-                    // ready for this transition yet. Remove this list once they
-                    // are.
+                    // Some HALs may not be ready for this transition
                     static const std::set<std::string> kAllowedHals = {
+                        // TODO(b/296130317)
                         "vendor.google.bluetooth_ext",
-                        "vendor.google.wifi_ext",
                     };
                     // v1 manifest entries that are declaring unfrozen versions must be removed
                     // from the manifest when the release configuration prevents the use of
@@ -429,6 +427,11 @@ class AssembleVintfImpl : public AssembleVintf {
                                 << latestVersion << ")." << std::endl;
                             return false;
                         }
+                        err() << "INFO: Downgrading HAL " << hal.getName()
+                              << " in the manifest from V" << halVersion << " to V"
+                              << halVersion - 1
+                              << " because it is unfrozen and unfrozen interfaces "
+                              << "are not allowed in this release configuration." << std::endl;
                         hal.versions[0] = hal.versions[0].withMinor(halVersion - 1);
                     }
                 }
@@ -438,7 +441,7 @@ class AssembleVintfImpl : public AssembleVintf {
             // These services should not be installed on the device, but there
             // are cases where the service is also service other HAL interfaces
             // and will remain on the device.
-            out() << "INFO: Removing HAL from the manifest because it is declaring V1 of a new "
+            err() << "INFO: Removing HAL from the manifest because it is declaring V1 of a new "
                      "unfrozen interface which is not allowed in this release configuration: "
                   << name << std::endl;
             manifest->removeHals(name, details::kDefaultAidlVersion.majorVer);
