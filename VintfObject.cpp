@@ -96,6 +96,7 @@ static bool isAllowedToUseLibvintf() {
     std::vector<std::string> allowedBinaries{
         "/system/bin/servicemanager",
         "/system/bin/hwservicemanager",
+        "/system_ext/bin/hwservicemanager",
         // Java: boot time VINTF check
         "/system/bin/app_process32",
         "/system/bin/app_process64",
@@ -248,6 +249,56 @@ status_t VintfObject::getCombinedFrameworkMatrix(
     return OK;
 }
 
+status_t VintfObject::addQspaDirectoryManifests(const std::string& directory,
+                            HalManifest* manifest, bool forceSchemaType, std::string* error) {
+
+    std::vector<std::string> fileNames;
+    status_t err = getFileSystem()->listFiles(directory, &fileNames, error);
+    // if the directory isn't there, that's okay
+    if (err == NAME_NOT_FOUND) {
+      if (error) {
+        error->clear();
+      }
+      return OK;
+    }
+    if (err != OK) return err;
+
+    std::string qspaProp;
+    for (const std::string& file : fileNames) {
+        //format: qspa-<subpart>.xml
+        int pos = file.find(".xml");
+        std::string part = file.substr(5, pos-5);
+        qspaProp = getPropertyFetcher()->getProperty("ro.boot.vendor.qspa."+part, "");
+        if(qspaProp == "disabled")
+        {
+            // Only adds HALs because all other things are added by libvintf
+            // itself for now.
+            HalManifest fragmentManifest;
+            err = fetchOneHalManifest(directory + file, &fragmentManifest, error);
+            if (err != OK) return err;
+
+            if (forceSchemaType) {
+                fragmentManifest.setType(manifest->type());
+            }
+
+            if (!manifest->addAll(&fragmentManifest, error)) {
+                if (error) {
+                    error->insert(0, "Cannot add manifest fragment " + directory + file + ": ");
+                }
+                return UNKNOWN_ERROR;
+            }
+        }
+        else
+        {
+            continue;
+        }
+
+    }
+
+    return OK;
+
+}
+
 // Load and combine all of the manifests in a directory
 // If forceSchemaType, all fragment manifests are coerced into manifest->type().
 status_t VintfObject::addDirectoryManifests(const std::string& directory, HalManifest* manifest,
@@ -357,6 +408,14 @@ status_t VintfObject::fetchDeviceHalManifestMinusApex(HalManifest* out, std::str
     }
 
     if (vendorStatus == OK) {
+        std::string qspaEnabled = getPropertyFetcher()->getProperty("ro.boot.vendor.qspa", "");
+        if (qspaEnabled == "true") {
+            status_t qspaFragmentStatus = addQspaDirectoryManifests(
+                            kQspaManifestFragmentDir, out, false /* forceSchemaType*/, error);
+            if (qspaFragmentStatus != OK) {
+                return qspaFragmentStatus;
+            }
+        }
         if (odmStatus == OK) {
             if (!out->addAll(&odmManifest, error)) {
                 if (error) {
@@ -838,7 +897,7 @@ bool VintfObject::IsInstanceDeprecated(const MatrixInstance& oldMatrixInstance,
                                                  fqInstance, deviceManifest);
             if (result.ok()) {
                 errors.clear();
-                return false;  // break
+                break;
             }
             std::string error = result.error().message() + "\n    ";
             std::string servedFqInstanceString =
