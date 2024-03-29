@@ -52,7 +52,7 @@ template <typename T>
 struct LockedSharedPtr {
     std::shared_ptr<T> object;
     std::mutex mutex;
-    bool fetchedOnce = false;
+    std::optional<timespec> lastModified;
 };
 
 struct LockedRuntimeInfoCache {
@@ -221,7 +221,6 @@ class VintfObject {
     std::unique_ptr<FileSystem> mFileSystem;
     std::unique_ptr<ObjectFactory<RuntimeInfo>> mRuntimeInfoFactory;
     std::unique_ptr<PropertyFetcher> mPropertyFetcher;
-    std::unique_ptr<ApexInterface> mApex;
     details::LockedSharedPtr<HalManifest> mDeviceManifest;
     details::LockedSharedPtr<HalManifest> mFrameworkManifest;
     details::LockedSharedPtr<CompatibilityMatrix> mDeviceMatrix;
@@ -253,7 +252,6 @@ class VintfObject {
     virtual const std::unique_ptr<FileSystem>& getFileSystem();
     virtual const std::unique_ptr<PropertyFetcher>& getPropertyFetcher();
     virtual const std::unique_ptr<ObjectFactory<RuntimeInfo>>& getRuntimeInfoFactory();
-    virtual const std::unique_ptr<ApexInterface>& getApex();
 
    public:
     /*
@@ -307,6 +305,9 @@ class VintfObject {
                           std::string* error = nullptr);
     status_t addDirectoryManifests(const std::string& directory, HalManifest* manifests,
                                    bool ignoreSchemaType, std::string* error);
+    status_t addDirectoriesManifests(const std::vector<std::string>& directories,
+                                     HalManifest* manifests, bool ignoreSchemaType,
+                                     std::string* error);
     status_t addQspaDirectoryManifests(const std::string& directory, HalManifest* manifests,
                                    bool ignoreSchemaType, std::string* error);
     status_t fetchDeviceHalManifest(HalManifest* out, std::string* error = nullptr);
@@ -318,6 +319,7 @@ class VintfObject {
                                  std::string* error = nullptr);
     status_t fetchVendorHalManifest(HalManifest* out, std::string* error = nullptr);
     status_t fetchFrameworkHalManifest(HalManifest* out, std::string* error = nullptr);
+    status_t fetchFrameworkHalManifestApex(HalManifest* out, std::string* error = nullptr);
 
     status_t fetchUnfilteredFrameworkHalManifest(HalManifest* out, std::string* error);
     void filterHalsByDeviceManifestLevel(HalManifest* out);
@@ -383,7 +385,6 @@ class VintfObjectBuilder {
     VintfObjectBuilder& setFileSystem(std::unique_ptr<FileSystem>&&);
     VintfObjectBuilder& setRuntimeInfoFactory(std::unique_ptr<ObjectFactory<RuntimeInfo>>&&);
     VintfObjectBuilder& setPropertyFetcher(std::unique_ptr<PropertyFetcher>&&);
-    VintfObjectBuilder& setApex(std::unique_ptr<ApexInterface>&&);
     template <typename VintfObjectType = VintfObject>
     std::unique_ptr<VintfObjectType> build() {
         return std::unique_ptr<VintfObjectType>(
